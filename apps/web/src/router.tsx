@@ -12,7 +12,7 @@ import { Loading } from "./components/ui";
 import { useSession } from "./lib/session";
 import { AccountPage } from "./pages/account";
 import { AdminPage } from "./pages/admin";
-import { ClaimPage, InvitePage, LoginPage } from "./pages/auth";
+import { ClaimPage, InvitePage, LoginPage, SignupPage } from "./pages/auth";
 import { PlaidOAuthPage } from "./pages/bank-feeds";
 import { ConnectPage } from "./pages/connect";
 import { DashboardPage } from "./pages/dashboard";
@@ -53,6 +53,7 @@ const index = createRoute({
 });
 
 const login = createRoute({ getParentRoute: () => root, path: "/login", component: LoginPage });
+const signup = createRoute({ getParentRoute: () => root, path: "/signup", component: SignupPage });
 const claim = createRoute({ getParentRoute: () => root, path: "/claim/$token", component: ClaimPage });
 const invite = createRoute({ getParentRoute: () => root, path: "/invite/$token", component: InvitePage });
 const orgs = createRoute({
@@ -118,6 +119,7 @@ const settings = createRoute({ getParentRoute: () => orgLayout, path: "/settings
 const routeTree = root.addChildren([
   index,
   login,
+  signup,
   claim,
   invite,
   orgs,

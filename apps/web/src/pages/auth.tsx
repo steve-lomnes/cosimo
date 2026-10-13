@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { ApiError, api, unwrap } from "../api/client";
 import { Alert, Button, Card, ErrorText, Field, Input, Loading } from "../components/ui";
-import { useRefreshSession } from "../lib/session";
+import { useRefreshSession, useSession } from "../lib/session";
 import { safeNext } from "./connect";
 
 function AuthFrame({ title, children }: { title: string; children: React.ReactNode }) {
@@ -23,7 +23,14 @@ function AuthFrame({ title, children }: { title: string; children: React.ReactNo
   );
 }
 
+/** The `?next=` query to carry between the login and sign-up pages. */
+function nextSearch(): { next?: string } {
+  const next = new URLSearchParams(window.location.search).get("next");
+  return next ? { next } : {};
+}
+
 export function LoginPage() {
+  const session = useSession();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
@@ -95,6 +102,120 @@ export function LoginPage() {
         <Button type="submit" loading={busy} className="w-full">
           Sign in
         </Button>
+        {session.data?.instance.signup_mode === "open" && (
+          <p className="text-center text-sm text-zinc-500">
+            No account?{" "}
+            <Link to="/signup" search={nextSearch()} className="underline">
+              Create one
+            </Link>
+          </p>
+        )}
+      </form>
+    </AuthFrame>
+  );
+}
+
+export function SignupPage() {
+  const session = useSession();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const refresh = useRefreshSession();
+  const navigate = useNavigate();
+  if (session.isLoading) return <Loading />;
+  if (session.data?.instance.signup_mode !== "open") {
+    return (
+      <AuthFrame title="Sign-up is closed">
+        <Alert>This instance doesn't accept public sign-ups. Ask an administrator for an invitation.</Alert>
+        <p className="mt-4 text-center text-sm text-zinc-500">
+          <Link to="/login" search={nextSearch()} className="underline">
+            Sign in
+          </Link>
+        </p>
+      </AuthFrame>
+    );
+  }
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (password !== confirm) return setError(new Error("Passwords do not match."));
+    setBusy(true);
+    setError(null);
+    try {
+      await unwrap(api.POST("/api/v1/auth/signup", { body: { email, password, name } }));
+      await refresh();
+      const next = safeNext(new URLSearchParams(window.location.search).get("next"));
+      if (next !== "/") window.location.assign(next);
+      else navigate({ to: "/" });
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <AuthFrame title="Create your account">
+      <form onSubmit={submit} className="space-y-4">
+        <Field label="Name">
+          {(id) => (
+            <Input
+              id={id}
+              autoComplete="name"
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Email">
+          {(id) => (
+            <Input
+              id={id}
+              type="email"
+              autoComplete="username"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Password" hint="At least 10 characters.">
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              autoComplete="new-password"
+              minLength={10}
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Confirm password">
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              autoComplete="new-password"
+              required
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+            />
+          )}
+        </Field>
+        <ErrorText error={error} />
+        <Button type="submit" loading={busy} className="w-full">
+          Create account
+        </Button>
+        <p className="text-center text-sm text-zinc-500">
+          Already have an account?{" "}
+          <Link to="/login" search={nextSearch()} className="underline">
+            Sign in
+          </Link>
+        </p>
       </form>
     </AuthFrame>
   );

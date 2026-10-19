@@ -13,6 +13,7 @@ import {
   requireAuth,
   requireSession,
   SESSION_COOKIE,
+  tokenGrants,
 } from "../middleware.ts";
 import { errorResponses, json, jsonBody, newRouter, OkSchema, RoleSchema, z } from "../openapi.ts";
 import type { AppEnv } from "../types.ts";
@@ -81,7 +82,8 @@ async function sessionView(c: Context<AppEnv>, csrfOverride?: string, userIdOver
   const userId = userIdOverride ?? p?.userId;
   const user = userId ? await ctx.users.byId(userId) : null;
   const orgs = user ? await ctx.orgs.listForUser(user.id) : [];
-  const scoped = p?.orgId ? orgs.filter((o) => o.id === p.orgId) : orgs;
+  const grants = p ? tokenGrants(p) : null;
+  const scoped = grants ? orgs.filter((o) => grants.some((g) => g.orgId === o.id)) : orgs;
   return {
     user: user
       ? {

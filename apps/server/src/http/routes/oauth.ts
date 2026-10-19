@@ -255,9 +255,11 @@ const ConnectionSchema = z
     client_name: z.string(),
     user_id: z.string(),
     user_email: z.string(),
-    org_id: z.string(),
-    org_name: z.string(),
-    role: z.string(),
+    /** Null in an owner's view of one org, or when the user removed the default and has several orgs left. */
+    default_org_id: z.string().nullable(),
+    orgs: z.array(
+      z.object({ org_id: z.string(), org_name: z.string(), role: z.string(), granted_at: z.string() }),
+    ),
     created_at: z.string(),
     last_used_at: z.string().nullable(),
   })
@@ -344,8 +346,13 @@ export function oauthRoutes() {
         body: jsonBody(
           AuthorizeQuery.extend({
             approve: z.boolean(),
-            org_id: z.string().optional(),
-            role: z.enum(ROLES).default("bookkeeper"),
+            /** Every org the user checked, each with the role it grants (capped at the user's own). */
+            orgs: z
+              .array(z.object({ org_id: z.string(), role: z.enum(ROLES).default("bookkeeper") }))
+              .max(100)
+              .optional(),
+            /** Required to approve, and must be one of `orgs`: the user picks it, it is never inferred. */
+            default_org_id: z.string().optional(),
           }),
         ),
       },
@@ -368,15 +375,24 @@ export function oauthRoutes() {
           { redirect_to: svc.errorRedirect(b.redirect_uri, "access_denied", "The user declined.", b.state) },
           200,
         );
-      if (!b.org_id) throw badRequest("Pick an organization.");
+      if (!b.orgs?.length) throw badRequest("Pick at least one organization.");
+      if (!b.default_org_id) throw badRequest("Pick the default organization.");
       try {
-        const out = await svc.approve(b, p.userId, b.org_id, b.role);
+        const out = await svc.approve(
+          b,
+          p.userId,
+          b.orgs.map((o) => ({ orgId: o.org_id, role: o.role })),
+          b.default_org_id,
+        );
         await instanceAudit(ctx.system, {
           userId: p.userId,
           action: "oauth.grant",
           targetType: "oauth_client",
           targetId: b.client_id,
-          detail: { org_id: b.org_id, role: out.role },
+          detail: {
+            orgs: out.grants.map((g) => ({ org_id: g.orgId, role: g.role })),
+            default_org_id: b.default_org_id,
+          },
           ip: c.get("ip"),
         });
         return c.json({ redirect_to: out.redirect_to }, 200);
@@ -406,7 +422,8 @@ export function oauthRoutes() {
       method: "delete",
       path: "/oauth/connections/{grantId}",
       tags: ["OAuth"],
-      summary: "Disconnect a client (your own, or any connected to an org you own)",
+      summary:
+        "Disconnect a client: your own connection entirely, or, as an owner, its access to the orgs you own",
       request: { params: z.object({ grantId: z.string() }) },
       responses: { 200: json(OkSchema), ...errorResponses },
     }),
@@ -416,14 +433,97 @@ export function oauthRoutes() {
       const svc = oauthService(ctx);
       const g = await svc.getGrant(c.req.valid("param").grantId);
       if (!g) throw notFound("Connection");
-      if (g.userId !== p.userId && (await ctx.orgs.membership(p.userId, g.orgId)) !== "owner")
+      if (g.userId === p.userId) {
+        await svc.revokeGrant(g.id);
+        await instanceAudit(ctx.system, {
+          userId: p.userId,
+          action: "oauth.revoke",
+          targetType: "oauth_grant",
+          targetId: g.id,
+          ip: c.get("ip"),
+        });
+        return c.json({ ok: true as const }, 200);
+      }
+      // Someone else's connection: an owner drops it from the orgs they own, and only those.
+      const owned = [];
+      for (const orgId of g.orgIds)
+        if ((await ctx.orgs.membership(p.userId, orgId)) === "owner") owned.push(orgId);
+      if (!owned.length) throw notFound("Connection");
+      for (const orgId of owned) {
+        await svc.revokeOrgGrant(g.id, orgId);
+        await instanceAudit(ctx.system, {
+          userId: p.userId,
+          action: "oauth.revoke_org",
+          targetType: "oauth_grant",
+          targetId: g.id,
+          detail: { org_id: orgId },
+          ip: c.get("ip"),
+        });
+      }
+      return c.json({ ok: true as const }, 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "delete",
+      path: "/oauth/connections/{grantId}/orgs/{orgId}",
+      tags: ["OAuth"],
+      summary:
+        "Remove one org from a connection (your own, or any connected to an org you own); its other orgs keep working",
+      request: { params: z.object({ grantId: z.string(), orgId: z.string() }) },
+      responses: { 200: json(OkSchema), ...errorResponses },
+    }),
+    async (c) => {
+      const p = requireSession(c);
+      const ctx = c.get("ctx");
+      const svc = oauthService(ctx);
+      const { grantId, orgId } = c.req.valid("param");
+      const g = await svc.getGrant(grantId);
+      if (!g?.orgIds.includes(orgId)) throw notFound("Connection");
+      if (g.userId !== p.userId && (await ctx.orgs.membership(p.userId, orgId)) !== "owner")
         throw notFound("Connection");
-      await svc.revokeGrant(g.id);
+      await svc.revokeOrgGrant(g.id, orgId);
       await instanceAudit(ctx.system, {
         userId: p.userId,
-        action: "oauth.revoke",
+        action: "oauth.revoke_org",
         targetType: "oauth_grant",
         targetId: g.id,
+        detail: { org_id: orgId },
+        ip: c.get("ip"),
+      });
+      return c.json({ ok: true as const }, 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "patch",
+      path: "/oauth/connections/{grantId}",
+      tags: ["OAuth"],
+      summary: "Change which of a connection's orgs its tools use by default (your own connection)",
+      request: {
+        params: z.object({ grantId: z.string() }),
+        body: jsonBody(z.object({ default_org_id: z.string() })),
+      },
+      responses: { 200: json(OkSchema), ...errorResponses },
+    }),
+    async (c) => {
+      const p = requireSession(c);
+      const ctx = c.get("ctx");
+      const svc = oauthService(ctx);
+      const g = await svc.getGrant(c.req.valid("param").grantId);
+      if (!g || g.userId !== p.userId) throw notFound("Connection");
+      const { default_org_id } = c.req.valid("json");
+      if (!g.orgIds.includes(default_org_id))
+        throw badRequest("The default organization must be one this connection covers.");
+      await svc.setDefaultOrg(g.id, default_org_id);
+      await instanceAudit(ctx.system, {
+        userId: p.userId,
+        action: "oauth.set_default_org",
+        targetType: "oauth_grant",
+        targetId: g.id,
+        detail: { org_id: default_org_id },
         ip: c.get("ip"),
       });
       return c.json({ ok: true as const }, 200);
@@ -435,7 +535,7 @@ export function oauthRoutes() {
       method: "get",
       path: "/orgs/{orgId}/oauth/connections",
       tags: ["OAuth"],
-      summary: "All AI clients connected to this organization (owner)",
+      summary: "All AI clients connected to this organization, each with only this org's grant (owner)",
       request: { params: OrgParams },
       responses: { 200: json(z.object({ data: z.array(ConnectionSchema) })), ...errorResponses },
     }),

@@ -65,20 +65,32 @@ export function ConnectPage() {
     retry: false,
     queryFn: () => unwrap(api.GET("/api/v1/oauth/consent", { params: { query: params as never } })),
   });
-  const [orgId, setOrgId] = useState("");
-  const [role, setRole] = useState("bookkeeper");
-  const org = info.data?.orgs.find((o) => o.id === (orgId || info.data?.orgs[0]?.id));
-  useEffect(() => {
-    if (org && !org.grantable_roles.includes(role))
-      setRole(
-        org.grantable_roles.includes("bookkeeper") ? "bookkeeper" : (org.grantable_roles[0] ?? "viewer"),
-      );
-  }, [org, role]);
+  // The checked orgs, each with the role it grants. The default is picked by the person, never
+  // pre-selected; picking one also checks it.
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  const [defaultOrg, setDefaultOrg] = useState("");
+  const startRole = (roles: string[]) =>
+    roles.includes("bookkeeper") ? "bookkeeper" : (roles[0] ?? "viewer");
+  const toggle = (o: { id: string; grantable_roles: string[] }, on: boolean) => {
+    setPicked((cur) => {
+      const next = { ...cur };
+      if (on) next[o.id] = cur[o.id] ?? startRole(o.grantable_roles);
+      else delete next[o.id];
+      return next;
+    });
+    if (!on && defaultOrg === o.id) setDefaultOrg("");
+  };
+  const ready = Object.keys(picked).length > 0 && defaultOrg in picked;
   const decide = useMutation({
     mutationFn: (approve: boolean) =>
       unwrap(
         api.POST("/api/v1/oauth/consent", {
-          body: { ...params, approve, org_id: org?.id, role } as never,
+          body: {
+            ...params,
+            approve,
+            orgs: Object.entries(picked).map(([org_id, role]) => ({ org_id, role })),
+            default_org_id: defaultOrg || undefined,
+          } as never,
         }),
       ),
     onSuccess: (r) => window.location.assign(r.redirect_to),
@@ -106,38 +118,76 @@ export function ConnectPage() {
                 <strong>{info.data.client.name}</strong> wants to work with your books. You'll be sent back to{" "}
                 <code>{info.data.client.redirect_host}</code>.
               </p>
-              <Field label="Organization">
-                {(id) => (
-                  <Select id={id} value={org?.id ?? ""} onChange={(e) => setOrgId(e.target.value)}>
-                    {info.data!.orgs.map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.name}
-                      </option>
-                    ))}
-                  </Select>
+              <fieldset className="space-y-2">
+                <legend className="mb-1 font-medium">Organizations</legend>
+                <p className="text-xs text-zinc-500">
+                  Check each organization it may use and pick its access. Then pick the default: the one it
+                  works in unless you name another.
+                </p>
+                {info.data.orgs.map((o) => {
+                  const on = o.id in picked;
+                  return (
+                    <div
+                      key={o.id}
+                      className="space-y-2 rounded border border-zinc-200 p-2 dark:border-zinc-700"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="flex items-center gap-2">
+                          <input type="checkbox" checked={on} onChange={(e) => toggle(o, e.target.checked)} />
+                          <span>{o.name}</span>
+                        </label>
+                        <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                          <input
+                            type="radio"
+                            name="default-org"
+                            aria-label={`Default: ${o.name}`}
+                            checked={defaultOrg === o.id}
+                            onChange={() => {
+                              toggle(o, true);
+                              setDefaultOrg(o.id);
+                            }}
+                          />
+                          Default
+                        </label>
+                      </div>
+                      {on && (
+                        <Select
+                          aria-label={`Access for ${o.name}`}
+                          value={picked[o.id]}
+                          onChange={(e) => setPicked((cur) => ({ ...cur, [o.id]: e.target.value }))}
+                        >
+                          {o.grantable_roles.map((r) => (
+                            <option key={r} value={r}>
+                              {ROLE_HELP[r] ?? r}
+                            </option>
+                          ))}
+                        </Select>
+                      )}
+                    </div>
+                  );
+                })}
+                {!ready && (
+                  <p className="text-xs text-zinc-500">
+                    {Object.keys(picked).length === 0
+                      ? "Check at least one organization."
+                      : "Pick which checked organization is the default."}
+                  </p>
                 )}
-              </Field>
-              <Field label="Access">
-                {(id) => (
-                  <Select id={id} value={role} onChange={(e) => setRole(e.target.value)}>
-                    {(org?.grantable_roles ?? []).map((r) => (
-                      <option key={r} value={r}>
-                        {ROLE_HELP[r] ?? r}
-                      </option>
-                    ))}
-                  </Select>
-                )}
-              </Field>
+              </fieldset>
               <ul className="list-inside list-disc text-zinc-600 dark:text-zinc-400">
                 <li>
                   Everything it writes to the books, corrections included, waits in your review queue until
                   you approve it. Only contacts and notes apply directly.
                 </li>
                 <li>It can't approve its own proposals, void, delete, or change lock dates.</li>
-                <li>You can disconnect it at any time from your account page.</li>
+                <li>
+                  It can't add organizations or change the default; only you can, from your account page. You
+                  can disconnect it, or remove one organization, at any time there.
+                </li>
               </ul>
               <div className="flex gap-2">
                 <Button
+                  disabled={!ready}
                   loading={decide.isPending && decide.variables === true}
                   onClick={() => decide.mutate(true)}
                 >
@@ -159,85 +209,147 @@ export function ConnectPage() {
 type Connection = {
   id: string;
   client_name: string;
-  org_name: string;
   user_email: string;
-  role: string;
+  default_org_id: string | null;
+  orgs: { org_id: string; org_name: string; role: string }[];
   created_at: string;
   last_used_at: string | null;
 };
 
-function ConnectionsTable({
-  rows,
-  showUser,
-  onRevoke,
-}: {
-  rows: Connection[];
-  showUser?: boolean;
-  onRevoke: (id: string) => void;
-}) {
-  if (!rows.length) return <p className="text-sm text-zinc-500">No connected apps.</p>;
-  return (
-    <Table>
-      <thead>
-        <tr>
-          <th className={th}>App</th>
-          {showUser ? <th className={th}>Connected by</th> : <th className={th}>Organization</th>}
-          <th className={th}>Access</th>
-          <th className={th}>Last used</th>
-          <th className={th} />
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((c) => (
-          <tr key={c.id}>
-            <td className={td}>{c.client_name}</td>
-            <td className={td}>{showUser ? c.user_email : c.org_name}</td>
-            <td className={td}>
-              <Badge>{c.role}</Badge>
-            </td>
-            <td className={td}>{c.last_used_at ? fmtDateTime(c.last_used_at) : "never"}</td>
-            <td className={`${td} text-right`}>
-              <Button size="sm" variant="secondary" onClick={() => onRevoke(c.id)}>
-                Disconnect
-              </Button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </Table>
-  );
-}
+const lastUsed = (c: Connection) => (c.last_used_at ? fmtDateTime(c.last_used_at) : "never");
 
+/** Disconnect a whole connection, or (with `orgId`) remove one org from it. */
 function useRevoke(keys: string[][]) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) =>
-      unwrap(api.DELETE("/api/v1/oauth/connections/{grantId}", { params: { path: { grantId: id } } })),
+    mutationFn: ({ id, orgId }: { id: string; orgId?: string }) =>
+      orgId
+        ? unwrap(
+            api.DELETE("/api/v1/oauth/connections/{grantId}/orgs/{orgId}", {
+              params: { path: { grantId: id, orgId } },
+            }),
+          )
+        : unwrap(api.DELETE("/api/v1/oauth/connections/{grantId}", { params: { path: { grantId: id } } })),
     onSuccess: () => {
       for (const k of keys) qc.invalidateQueries({ queryKey: k });
     },
   });
 }
 
+/** One connection: a row per org, with per-org removal and the default-org picker. */
+function ConnectionCard({
+  c,
+  onRevoke,
+  onDefault,
+}: {
+  c: Connection;
+  onRevoke: (orgId?: string) => void;
+  onDefault: (orgId: string) => void;
+}) {
+  return (
+    <div className="rounded border border-zinc-200 dark:border-zinc-700">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
+        <div>
+          <div className="font-medium">{c.client_name}</div>
+          <div className="text-xs text-zinc-500">Last used {lastUsed(c)}</div>
+        </div>
+        <Button size="sm" variant="secondary" onClick={() => onRevoke()}>
+          Disconnect
+        </Button>
+      </div>
+      {!c.default_org_id && c.orgs.length > 1 && (
+        <p className="px-3 pt-2 text-xs text-amber-700 dark:text-amber-400">
+          No default organization: the assistant must name one on every call. Pick a default below.
+        </p>
+      )}
+      <Table>
+        <thead>
+          <tr>
+            <th className={th}>Organization</th>
+            <th className={th}>Access</th>
+            <th className={th}>Default</th>
+            <th className={th} />
+          </tr>
+        </thead>
+        <tbody>
+          {c.orgs.map((o) => (
+            <tr key={o.org_id}>
+              <td className={td}>{o.org_name}</td>
+              <td className={td}>
+                <Badge>{o.role}</Badge>
+              </td>
+              <td className={td}>
+                <input
+                  type="radio"
+                  name={`default-${c.id}`}
+                  aria-label={`Default for ${c.client_name}: ${o.org_name}`}
+                  checked={c.default_org_id === o.org_id}
+                  onChange={() => onDefault(o.org_id)}
+                />
+              </td>
+              <td className={`${td} text-right`}>
+                {c.orgs.length > 1 && (
+                  <Button size="sm" variant="secondary" onClick={() => onRevoke(o.org_id)}>
+                    Remove
+                  </Button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    </div>
+  );
+}
+
 /** Account page: the user's own connected apps. */
 export function MyConnections() {
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["oauth-connections"],
     queryFn: () => unwrap(api.GET("/api/v1/oauth/connections")),
   });
   const revoke = useRevoke([["oauth-connections"]]);
+  const setDefault = useMutation({
+    mutationFn: ({ id, orgId }: { id: string; orgId: string }) =>
+      unwrap(
+        api.PATCH("/api/v1/oauth/connections/{grantId}", {
+          params: { path: { grantId: id } },
+          body: { default_org_id: orgId },
+        }),
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["oauth-connections"] }),
+  });
+  const rows = q.data?.data;
   return (
     <Card title="Connected AI apps">
       <p className="mb-3 text-sm text-zinc-500">
-        Apps you connected through “Add connector” (OAuth). Disconnecting stops them at once.
+        Apps you connected through “Add connector” (OAuth). Each can work in the organizations listed under
+        it, in the default one unless it names another. Disconnecting or removing an organization stops it at
+        once.
       </p>
-      {q.data ? <ConnectionsTable rows={q.data.data} onRevoke={(id) => revoke.mutate(id)} /> : <Loading />}
-      <ErrorText error={revoke.error} />
+      {!rows ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <p className="text-sm text-zinc-500">No connected apps.</p>
+      ) : (
+        <div className="space-y-4">
+          {rows.map((c) => (
+            <ConnectionCard
+              key={c.id}
+              c={c}
+              onRevoke={(orgId) => revoke.mutate({ id: c.id, orgId })}
+              onDefault={(orgId) => setDefault.mutate({ id: c.id, orgId })}
+            />
+          ))}
+        </div>
+      )}
+      <ErrorText error={revoke.error ?? setDefault.error} />
     </Card>
   );
 }
 
-/** Org settings: every app connected to this org (owners). */
+/** Org settings: every app connected to this org (owners). Disconnecting removes only this org. */
 export function OrgConnections() {
   const orgId = useOrgId();
   const q = useQuery({
@@ -245,12 +357,13 @@ export function OrgConnections() {
     queryFn: () => unwrap(api.GET("/api/v1/orgs/{orgId}/oauth/connections", { params: { path: { orgId } } })),
   });
   const revoke = useRevoke([["org-oauth-connections", orgId], ["oauth-connections"]]);
+  const rows = q.data?.data;
   return (
     <div className="space-y-6">
       <Card title="Connect an AI assistant">
         <p className="text-sm">
           Add this server as a connector in Claude or another MCP client using this URL; you'll sign in and
-          pick an organization:
+          pick the organizations it may use:
         </p>
         <code className="mt-2 block break-all rounded bg-zinc-100 px-2 py-1 text-sm dark:bg-zinc-800">
           {`${window.location.origin}/mcp`}
@@ -261,10 +374,39 @@ export function OrgConnections() {
         </p>
       </Card>
       <Card title="Connected AI apps">
-        {q.data ? (
-          <ConnectionsTable rows={q.data.data} showUser onRevoke={(id) => revoke.mutate(id)} />
-        ) : (
+        {!rows ? (
           <ErrorText error={q.error} />
+        ) : rows.length === 0 ? (
+          <p className="text-sm text-zinc-500">No connected apps.</p>
+        ) : (
+          <Table>
+            <thead>
+              <tr>
+                <th className={th}>App</th>
+                <th className={th}>Connected by</th>
+                <th className={th}>Access</th>
+                <th className={th}>Last used</th>
+                <th className={th} />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((c) => (
+                <tr key={c.id}>
+                  <td className={td}>{c.client_name}</td>
+                  <td className={td}>{c.user_email}</td>
+                  <td className={td}>
+                    <Badge>{c.orgs.find((o) => o.org_id === orgId)?.role ?? ""}</Badge>
+                  </td>
+                  <td className={td}>{lastUsed(c)}</td>
+                  <td className={`${td} text-right`}>
+                    <Button size="sm" variant="secondary" onClick={() => revoke.mutate({ id: c.id, orgId })}>
+                      Disconnect
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
         )}
         <ErrorText error={revoke.error} />
       </Card>

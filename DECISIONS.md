@@ -265,8 +265,15 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   token stops working and a grant never piles up rows.
 - **Replaying a code revokes what it produced.** The revocation commits first and the error is
   raised after the transaction, so it can't be rolled back with it.
-- **A grant is one user × one org × one role**, capped at the user's own role. OAuth principals
-  act as `mcp` and are always propose-only.
+- **A connection is one user × one client × a set of orgs, each with its own role** (#87), capped
+  at the user's own role there. Claude won't take the same `/mcp` URL twice, so a second connector
+  per org wasn't an option. The token pair stays one row; `oauth_token_orgs` holds each org's role
+  and its own `revoked_at`, so one org can be dropped without disconnecting the rest. The stateless
+  transport can't remember a current org, so every tool takes an optional `org_id` and falls back
+  to a default the user picks on consent (never pre-selected) and can change only from Account. A
+  removed default with several orgs left leaves no default rather than guessing one. Refresh drops
+  orgs the user left. API tokens stay single-org. OAuth principals act as `mcp` and are always
+  propose-only.
 - **OAuth tokens are read-only on the REST API.** Anything but GET/HEAD/OPTIONS gets 403, so an
   assistant can't reach void, reverse, approve or lock endpoints outside the MCP tool set.
 - **Idempotency keys** are stored per principal (user, API token or OAuth token) for 24 hours with

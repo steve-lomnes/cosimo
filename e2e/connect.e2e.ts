@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import { E2E_EMAIL, E2E_PASSWORD } from "./constants.ts";
 
 const REDIRECT = "https://client.example.com/callback";
+const ORG = "E2E Studio LLC";
 
 test("an AI client connects with OAuth: sign in, consent, exchange the code, call MCP", async ({
   page,
@@ -37,8 +38,14 @@ test("an AI client connects with OAuth: sign in, consent, exchange the code, cal
   await page.getByRole("button", { name: /sign in/i }).click();
 
   await expect(page.getByText("E2E Assistant")).toBeVisible();
-  await expect(page.getByLabel("Access")).toHaveValue("bookkeeper");
-  await page.getByRole("button", { name: "Allow" }).click();
+  // Allow waits for an org and an explicitly picked default; nothing is pre-selected.
+  const allow = page.getByRole("button", { name: "Allow" });
+  await expect(allow).toBeDisabled();
+  await page.getByRole("checkbox", { name: ORG }).check();
+  await expect(page.getByLabel(`Access for ${ORG}`)).toHaveValue("bookkeeper");
+  await expect(allow).toBeDisabled();
+  await page.getByLabel(`Default: ${ORG}`).check();
+  await allow.click();
   await expect.poll(() => callback).toContain("code=");
   const back = new URL(callback);
   expect(back.searchParams.get("state")).toBe("e2e");
@@ -59,9 +66,12 @@ test("an AI client connects with OAuth: sign in, consent, exchange the code, cal
     data: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_orgs", arguments: {} } },
   });
   const body = await mcp.json();
-  expect(body.result.structuredContent.orgs[0].role).toBe("bookkeeper");
+  const [granted] = body.result.structuredContent.orgs;
+  expect(granted).toMatchObject({ name: ORG, role: "bookkeeper", is_default: true });
 
   await page.unroute("https://client.example.com/**");
   await page.goto("/account");
-  await expect(page.getByRole("cell", { name: "E2E Assistant" })).toBeVisible();
+  await expect(page.getByText("E2E Assistant")).toBeVisible();
+  await expect(page.getByRole("cell", { name: ORG, exact: true })).toBeVisible();
+  await expect(page.getByLabel(`Default for E2E Assistant: ${ORG}`)).toBeChecked();
 });

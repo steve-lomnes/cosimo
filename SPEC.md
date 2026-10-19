@@ -473,7 +473,7 @@ The MCP endpoint MUST support OAuth 2.1 per the MCP authorization specification,
 - Publish OAuth protected resource metadata and authorization server metadata at the standard well-known paths.
 - Support dynamic client registration so a client can register itself. Instance admins can disable dynamic registration and instead pre-register clients manually from Settings, which issues a client ID and secret.
 - Authorization code flow with PKCE (S256 only). Short-lived access tokens (1 hour) and rotating refresh tokens (30 days).
-- The consent screen shows the client name, asks the user to pick one org, and shows the role granted, capped at the user's own role. The default grant for AI clients is Bookkeeper with all writes routed through the review queue.
+- The consent screen shows the client name, asks the user to check one or more orgs with a role for each (capped at the user's own role in that org), and to pick which of them is the default. One connection covers every org checked; MCP tools take an optional `org_id` and use the default without one. The default grant for AI clients is Bookkeeper with all writes routed through the review queue.
 - Users can see and revoke connected clients under Settings, and owners can see all clients connected to their org.
 - Static API tokens remain supported for scripts and for clients that lack OAuth support.
 - Redirect URIs are validated exactly. `localhost` redirect URIs are allowed only for loopback clients.

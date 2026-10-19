@@ -5,11 +5,12 @@ import { and, desc, eq, gt, isNull, lt } from "drizzle-orm";
 import { hashToken, randomToken } from "../../crypto.ts";
 import { appendAudit } from "../../services/audit.ts";
 import { instanceAudit } from "../../services/instance-audit.ts";
+import { revokeUserOrgGrantsTx } from "../../services/oauth.ts";
 import { stripeOptions } from "../../services/payment-providers/index.ts";
 import { verifyPlaidKeys } from "../../services/plaid.ts";
 import { loadSampleData } from "../../services/sample-data.ts";
 import { ApiError, badRequest, conflict, forbidden, notFound } from "../errors.ts";
-import { rateLimit, requireAuth, requireOwner, requireSession } from "../middleware.ts";
+import { rateLimit, requireAuth, requireOwner, requireSession, tokenGrants } from "../middleware.ts";
 import {
   bearerSecurity,
   errorResponses,
@@ -166,7 +167,8 @@ export function orgRoutes() {
     async (c) => {
       const p = requireAuth(c);
       let orgs = await c.get("ctx").orgs.listForUser(p.userId);
-      if (p.orgId) orgs = orgs.filter((o) => o.id === p.orgId);
+      const grants = tokenGrants(p);
+      if (grants) orgs = orgs.filter((o) => grants.some((g) => g.orgId === o.id));
       return c.json(
         { data: orgs.map((o) => ({ id: o.id, name: o.name, role: o.role, is_sample: o.isSample })) },
         200,
@@ -478,10 +480,7 @@ export function orgRoutes() {
           .update(system.apiTokens)
           .set({ revokedAt: new Date().toISOString() })
           .where(and(eq(system.apiTokens.orgId, o.id), eq(system.apiTokens.userId, userId)));
-        await tx
-          .update(system.oauthTokens)
-          .set({ revokedAt: new Date().toISOString() })
-          .where(and(eq(system.oauthTokens.orgId, o.id), eq(system.oauthTokens.userId, userId)));
+        await revokeUserOrgGrantsTx(tx, userId, o.id);
       });
       await o.handle.write((tx) =>
         appendAudit(tx, o.id, o.actor, {

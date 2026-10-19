@@ -13,10 +13,21 @@ export interface Principal {
   apiTokenId?: string;
   oauthTokenId?: string;
   oauthClientId?: string;
-  /** Tokens are scoped to one org and capped at a role. */
+  /** API tokens are scoped to one org and capped at a role. */
   orgId?: string;
   roleCap?: Role;
+  /**
+   * OAuth connections cover a set of orgs, each capped at its own role. Only orgs in this list are
+   * reachable; `defaultOrgId` is the one MCP tools use when a call names none.
+   */
+  orgGrants?: OrgGrant[];
+  defaultOrgId?: string | null;
   proposeOnly?: boolean;
+}
+
+export interface OrgGrant {
+  orgId: string;
+  roleCap: Role;
 }
 
 export interface OrgScope {

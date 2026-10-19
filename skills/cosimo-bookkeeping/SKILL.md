@@ -5,18 +5,23 @@ description: Do bookkeeping in a Cosimo instance over MCP. Covers the monthly cl
 
 # Bookkeeping with Cosimo
 
-Cosimo is self-hosted double-entry bookkeeping. You work in one organization through its MCP
-server (`<instance>/mcp`). Everything you write is a **proposal**: it waits in the review queue
+Cosimo is self-hosted double-entry bookkeeping. You work through its MCP server
+(`<instance>/mcp`), in one or more organizations the person approved, one of which is the default. Everything you write is a **proposal**: it waits in the review queue
 until a person approves it. You can't approve, reject, void, delete, or change lock dates, so don't
 offer to. Corrections to posted entries are proposals too (see "Corrections" below).
 
 ## Before anything else
 
-1. `list_orgs`: confirm which organization and role you have. Say so if the role is read-only
-   (Accountant or Viewer).
-2. Read the resource `org://profile`: what the business does, how it bills, typical customers and
-   vendors, and which account to use for recurring items. It is the main source for categorizing.
-3. Read `org://notes`: what people and earlier assistants learned about these books.
+1. `list_orgs`: confirm which organizations you have, your role in each, and which is the default
+   (`is_default`). Say so if the role is read-only (Accountant or Viewer). Every other tool takes
+   an optional `org_id`: leave it out to work in the default organization, and pass it to work in
+   another one. If the person means an organization that isn't listed, they must add it in Cosimo
+   (Account → Connected AI apps, or by connecting again); you can't.
+2. Read the business profile (`get_org_profile`, or the resource `org://profile`; for another
+   organization, `org://{org_id}/profile`): what the business does, how it bills, typical customers
+   and vendors, and which account to use for recurring items. It is the main source for categorizing.
+3. Read the notes (`get_org_notes`, or `org://notes`): what people and earlier assistants learned
+   about these books.
 4. `get_account_balances`: the chart of accounts. Refer to accounts by **code** (for example
    `6100`) in tool calls.
 5. For a quick overview instead of running full reports, use `get_cash_snapshot`: cash and card

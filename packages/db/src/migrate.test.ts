@@ -289,3 +289,82 @@ test("0001_known_randall (system) backfills is_sample for the existing demo org 
     rmSync(sysDir, { recursive: true, force: true });
   }
 });
+
+test("0002_oauth_multi_org (system) moves each code's and token's org into one grant, with that org as the default", async () => {
+  const sysDir = mkdtempSync(join(tmpdir(), "cosimo-migrate-sys-"));
+  const sysClient = createClient({ url: `file:${join(sysDir, "system.db")}` });
+  try {
+    const upTo = systemMigrations.findIndex((m) => m.tag === "0002_oauth_multi_org");
+    expect(upTo).toBeGreaterThan(0);
+    await migrate(sysClient, systemMigrations.slice(0, upTo));
+    expect((await sysClient.execute("PRAGMA foreign_keys")).rows[0]?.foreign_keys).toBe(1);
+    const run = (sql: string, args: (string | null)[]) => sysClient.execute({ sql, args });
+    await run("INSERT INTO users (id, email) VALUES (?, ?)", ["u1", "u1@example.com"]);
+    await run("INSERT INTO organizations (id, name, db_url) VALUES (?, ?, ?)", ["o1", "Acme", "file:a.db"]);
+    await run("INSERT INTO organizations (id, name, db_url) VALUES (?, ?, ?)", ["o2", "Other", "file:b.db"]);
+    await run(
+      "INSERT INTO oauth_clients (id, client_name, redirect_uris_json, registered_via) VALUES (?, ?, ?, ?)",
+      ["c1", "Claude", "[]", "dynamic"],
+    );
+    await run(
+      "INSERT INTO oauth_codes (code_hash, client_id, user_id, org_id, role, scope, code_challenge, redirect_uri, expires_at) VALUES (?, 'c1', 'u1', ?, ?, 'books', 'x', 'https://c/cb', '2030-01-01')",
+      ["h1", "o1", "viewer"],
+    );
+    const token =
+      "INSERT INTO oauth_tokens (id, client_id, user_id, org_id, role, scope, access_token_hash, refresh_token_hash, access_expires_at, created_at, revoked_at) VALUES (?, 'c1', 'u1', ?, ?, 'books', ?, ?, '2030-01-01', '2026-01-01T00:00:00.000Z', ?)";
+    await run(token, ["t1", "o1", "bookkeeper", "a1", "r1", null]);
+    await run(token, ["t2", "o2", "accountant", "a2", "r2", null]);
+    await run(token, ["t3", "o1", "owner", "a3", "r3", "2026-02-01T00:00:00.000Z"]);
+
+    expect(await migrate(sysClient, systemMigrations.slice(0, upTo + 1))).toEqual(["0002_oauth_multi_org"]);
+    const tokens = await sysClient.execute(
+      "SELECT id, default_org_id, access_token_hash, refresh_token_hash, revoked_at FROM oauth_tokens ORDER BY id",
+    );
+    expect(
+      tokens.rows.map((r) => [r.id, r.default_org_id, r.access_token_hash, r.refresh_token_hash]),
+    ).toEqual([
+      ["t1", "o1", "a1", "r1"],
+      ["t2", "o2", "a2", "r2"],
+      ["t3", "o1", "a3", "r3"],
+    ]);
+    const grants = await sysClient.execute(
+      "SELECT token_id, org_id, role, created_at, revoked_at FROM oauth_token_orgs ORDER BY token_id",
+    );
+    expect(grants.rows.map((r) => [r.token_id, r.org_id, r.role, r.created_at, r.revoked_at])).toEqual([
+      ["t1", "o1", "bookkeeper", "2026-01-01T00:00:00.000Z", null],
+      ["t2", "o2", "accountant", "2026-01-01T00:00:00.000Z", null],
+      ["t3", "o1", "owner", "2026-01-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z"],
+    ]);
+    const codes = await sysClient.execute("SELECT code_hash, default_org_id FROM oauth_codes");
+    expect(codes.rows.map((r) => [r.code_hash, r.default_org_id])).toEqual([["h1", "o1"]]);
+    const codeOrgs = await sysClient.execute("SELECT code_hash, org_id, role FROM oauth_code_orgs");
+    expect(codeOrgs.rows.map((r) => [r.code_hash, r.org_id, r.role])).toEqual([["h1", "o1", "viewer"]]);
+
+    // The old columns are gone, and the child tables' foreign keys point at the rebuilt tables.
+    const cols = (await sysClient.execute("SELECT name FROM pragma_table_info('oauth_tokens')")).rows.map(
+      (r) => String(r.name),
+    );
+    expect(cols).not.toContain("org_id");
+    expect(cols).not.toContain("role");
+    expect((await sysClient.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+    const fks = await sysClient.execute(
+      "SELECT m.name AS t, f.\"table\" AS parent FROM sqlite_master m, pragma_foreign_key_list(m.name) f WHERE m.name IN ('oauth_token_orgs', 'oauth_code_orgs') ORDER BY m.name, parent",
+    );
+    expect(fks.rows.map((r) => [r.t, r.parent])).toEqual([
+      ["oauth_code_orgs", "oauth_codes"],
+      ["oauth_code_orgs", "organizations"],
+      ["oauth_token_orgs", "oauth_tokens"],
+      ["oauth_token_orgs", "organizations"],
+    ]);
+    await expect(
+      run("INSERT INTO oauth_token_orgs (token_id, org_id, role) VALUES (?, ?, ?)", [
+        "missing",
+        "o1",
+        "viewer",
+      ]),
+    ).rejects.toThrow(/FOREIGN KEY/);
+  } finally {
+    sysClient.close();
+    rmSync(sysDir, { recursive: true, force: true });
+  }
+});

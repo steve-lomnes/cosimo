@@ -12882,7 +12882,7 @@ export interface paths {
                          */
                         amount: number;
                         /**
-                         * @description Bank/cash account (or credit card for payments sent)
+                         * @description Bank, other current asset, credit card, other current liability, or owner's equity account
                          * @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5
                          */
                         account_id: string;

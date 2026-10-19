@@ -1,3 +1,4 @@
+import { isPaymentAccount } from "@cosimo/core/coa";
 import { dueFromRule, isIsoDate, parseTerms, termsAgree, termsFromDates } from "@cosimo/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
@@ -1190,9 +1191,7 @@ export function PaymentModal({
             {(id) => (
               <AccountSelect
                 id={id}
-                accounts={(accounts.data ?? []).filter(
-                  (a) => a.type === "asset" || (direction === "sent" && a.subtype === "credit_card"),
-                )}
+                accounts={(accounts.data ?? []).filter(isPaymentAccount)}
                 value={bank}
                 onChange={setAccount}
               />

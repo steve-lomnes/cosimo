@@ -525,6 +525,7 @@ describe("MCP", () => {
       "list_bill_payments",
       "list_invoice_payments",
       "record_invoice_payment",
+      "record_bill_payment",
       "create_bill_draft",
       "get_cash_snapshot",
       "list_pending_reviews",
@@ -1802,6 +1803,98 @@ describe("MCP", () => {
       const ro = (await authorize(viewer, await register("Viewer Payment AI"))).tok.body.access_token;
       const v = await call(ro, "record_invoice_payment", { ...base, invoices: [{ invoice: i1.number }] });
       expect(v.isError).toBe(true);
+    });
+  });
+  describe("record_bill_payment", () => {
+    const api = (path: string) => `/api/v1/orgs/${orgId}${path}`;
+    const accountsList = async () =>
+      (await call(token, "get_account_balances", {})).structuredContent.accounts;
+    async function vendor(name: string) {
+      return (await owner.json("POST", api("/contacts"), { kind: "vendor", name })).body.id as string;
+    }
+    async function bill(vendorId: string, amount: number, number: string) {
+      const expense = (await accountsList()).find((a: any) => a.type === "expense");
+      const b = await owner.json("POST", api("/bills"), {
+        vendor_id: vendorId,
+        bill_number: number,
+        issue_date: "2026-07-01",
+        lines: [{ description: "Work", amount, account_id: expense.id }],
+      });
+      expect(b.status).toBe(201);
+      return b.body.bill as { id: string };
+    }
+    const getBill = async (id: string) => (await owner.json("GET", api(`/bills/${id}`))).body;
+    const approve = (reviewId: string) => owner.json("POST", api(`/review/${reviewId}/approve`), {});
+
+    test("is listed, and an owner-equity payment is approved to paid with AP back to zero", async () => {
+      const names = (await mcp(token, "tools/list")).body.result.tools.map((t: any) => t.name);
+      expect(names).toContain("record_bill_payment");
+      const equity = (await accountsList()).find((a: any) => a.code === "3100");
+      const v = await vendor("Owner Paid Vendor");
+      const b = await bill(v, 30_000, "OP-1");
+      const r = await call(token, "record_bill_payment", {
+        bills: [{ bill: "OP-1" }],
+        date: "2026-07-10",
+        amount: 30_000,
+        account: equity.code,
+        rationale: "The owner paid this personally",
+      });
+      expect(r.isError).toBe(false);
+      expect(r.structuredContent).toMatchObject({
+        status: "pending_review",
+        unapplied: 0,
+        bills: [{ bill_id: b.id, number: "OP-1", applied: 30_000, balance_due_after: 0 }],
+      });
+      expect((await getBill(b.id)).status).not.toBe("paid");
+      expect((await approve(r.structuredContent.review_item_id)).status).toBe(200);
+      expect((await getBill(b.id)).status).toBe("paid");
+      const listed = (await call(token, "list_bill_payments", {})).structuredContent.payments;
+      expect(listed.find((p: any) => p.id === r.structuredContent.payment_id)).toBeTruthy();
+      expect((await owner.json("POST", api("/verify"))).body.ok).toBe(true);
+    });
+
+    test("refuses over-applied amounts, invoice IDs, and accounts payment cannot move through", async () => {
+      const cash = (await accountsList()).find((a: any) => a.code === "1000");
+      const v = await vendor("Refusal Vendor");
+      const b = await bill(v, 10_000, "RF-1");
+      const over = await call(token, "record_bill_payment", {
+        bills: [{ bill: b.id, amount: 20_000 }],
+        date: "2026-07-10",
+        amount: 20_000,
+        account: cash.code,
+        rationale: "Too much",
+      });
+      expect(over.isError).toBe(true);
+      expect(over.content[0]!.text).toContain("over_applied");
+      const customerId = (await owner.json("POST", api("/contacts"), { kind: "customer", name: "Cust RF" }))
+        .body.id;
+      const income = (await accountsList()).find((a: any) => a.type === "income");
+      const inv = (
+        await owner.json("POST", api("/invoices"), {
+          customer_id: customerId,
+          issue_date: "2026-07-01",
+          lines: [{ description: "x", unit_price: 5_000, account_id: income.id }],
+        })
+      ).body;
+      await owner.json("POST", api(`/invoices/${inv.id}/finalize`), {});
+      const wrongType = await call(token, "record_bill_payment", {
+        bills: [{ bill: inv.id }],
+        date: "2026-07-10",
+        amount: 5_000,
+        account: cash.code,
+        rationale: "Wrong document type",
+      });
+      expect(wrongType.isError).toBe(true);
+      const ap = (await accountsList()).find((a: any) => a.code === "2000");
+      const badAccount = await call(token, "record_bill_payment", {
+        bills: [{ bill: b.id }],
+        date: "2026-07-10",
+        amount: 10_000,
+        account: ap.code,
+        rationale: "Paying AP from AP",
+      });
+      expect(badAccount.isError).toBe(true);
+      expect(badAccount.content[0]!.text).toContain("invalid_account");
     });
   });
   describe("withdraw_proposal covers every proposal type", () => {

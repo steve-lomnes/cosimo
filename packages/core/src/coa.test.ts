@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chartOfAccounts, TAX_LINES } from "./coa";
+import { chartOfAccounts, isPaymentAccount, TAX_LINES } from "./coa";
 
 const TEMPLATES = ["schedule_c", "form_1065", "form_1120s", "minimal"] as const;
 
@@ -39,4 +39,28 @@ describe("chart of accounts templates", () => {
     );
     expect(chartOfAccounts("minimal").some((a) => a.code === "2400")).toBe(false);
   });
+});
+
+describe("isPaymentAccount", () => {
+  const ok = [
+    ["asset", "bank"],
+    ["asset", "other_current_asset"],
+    ["liability", "credit_card"],
+    ["liability", "other_current_liability"],
+    ["equity", "owner_equity"],
+  ] as const;
+  for (const [type, subtype] of ok)
+    test(`${type}/${subtype} is allowed`, () => expect(isPaymentAccount({ type, subtype })).toBe(true));
+  const no = [
+    ["asset", "accounts_receivable"],
+    ["asset", "fixed_asset"],
+    ["liability", "accounts_payable"],
+    ["liability", "long_term_liability"],
+    ["equity", "retained_earnings"],
+    ["income", "income"],
+    ["expense", "expense"],
+    ["asset", null],
+  ] as const;
+  for (const [type, subtype] of no)
+    test(`${type}/${subtype} is refused`, () => expect(isPaymentAccount({ type, subtype })).toBe(false));
 });

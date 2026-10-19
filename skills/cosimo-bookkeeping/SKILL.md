@@ -85,6 +85,9 @@ tell the person if one of theirs is wrong.
    for one already waiting, then propose `record_invoice_payment` with the deposit's
    `transaction_id`. Don't categorize it to income, which would count the revenue twice. A
    partial payment leaves the invoice partial; tell the person about any credit left over.
+   To pay a vendor bill, propose `record_bill_payment` with the account the money moved through
+   (bank, credit card, or, when the owner paid personally, an other current liability or owner's
+   equity account).
 4. For new work the person describes, propose an invoice with `create_invoice_draft` (customer,
    lines with quantity, unit price in cents, and income account code). Leave out `terms` and
    `due_date` to use the customer's or the org's default terms. Give a `due_date` alone and the terms

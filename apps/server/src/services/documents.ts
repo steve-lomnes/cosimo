@@ -5,6 +5,7 @@
  * so a large invoice may wait in the review queue; document state follows the entry through the
  * post/reject hooks at the bottom of this file.
  */
+import { isPaymentAccount } from "@cosimo/core";
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import {
   addDays,
@@ -1089,12 +1090,16 @@ export async function recordPaymentTx(
   if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
     throw unprocessable("The payment amount must be positive.", "invalid_amount");
   const contact = await mustGetContact(tx, input.contact_id);
-  const acct = (await accountMap(tx)).get(input.account_id);
+  const acct = await tx
+    .select({ type: org.accounts.type, subtype: org.accounts.subtype, isActive: org.accounts.isActive })
+    .from(org.accounts)
+    .where(eq(org.accounts.id, input.account_id))
+    .get();
   if (!acct?.isActive)
     throw unprocessable("Choose an active account the money moved through.", "invalid_account");
-  if (acct.type !== "asset" && !(input.direction === "sent" && acct.type === "liability")) {
+  if (!isPaymentAccount(acct)) {
     throw unprocessable(
-      "Payments move through a bank or cash account (or a credit card for payments you make).",
+      "Payments move through a bank, other current asset, credit card, other current liability, or owner's equity account.",
       "invalid_account",
     );
   }

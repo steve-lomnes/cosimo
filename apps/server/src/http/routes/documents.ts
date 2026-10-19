@@ -869,7 +869,10 @@ export function documentRoutes() {
             contact_id: Id,
             date: IsoDate,
             amount: Cents.refine((n) => n > 0, "Must be positive"),
-            account_id: Id.openapi({ description: "Bank/cash account (or credit card for payments sent)" }),
+            account_id: Id.openapi({
+              description:
+                "Bank, other current asset, credit card, other current liability, or owner's equity account",
+            }),
             method: z.string().max(40).nullable().optional(),
             reference: z.string().max(100).nullable().optional(),
             memo: z.string().max(1000).nullable().optional(),

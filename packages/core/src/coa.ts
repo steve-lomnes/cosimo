@@ -4,6 +4,14 @@
  */
 import type { AccountSubtype, AccountType, CoaTemplate } from "@cosimo/shared";
 
+/** Accounts money can move through in a bill or invoice payment (same rule both directions). */
+export function isPaymentAccount(a: { type: string; subtype: string | null }): boolean {
+  if (a.type === "asset") return a.subtype === "bank" || a.subtype === "other_current_asset";
+  if (a.type === "liability") return a.subtype === "credit_card" || a.subtype === "other_current_liability";
+  if (a.type === "equity") return a.subtype === "owner_equity";
+  return false;
+}
+
 export interface AccountTemplate {
   code: string;
   name: string;

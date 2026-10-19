@@ -598,3 +598,134 @@ describe(`invoice terms and due dates (${DB_MODE})`, () => {
     expect(nul.body).toMatchObject({ terms: "Net 45", due_date: "2026-02-24" });
   });
 });
+
+describe(`bill and invoice payment accounts (${DB_MODE})`, () => {
+  let payVendor: string;
+  let expenseId: string;
+  let ids: Record<"liability" | "equity" | "asset" | "ap" | "ar" | "income" | "expense" | "fixed", string>;
+
+  beforeAll(async () => {
+    payVendor = (await owner.json("POST", `${base()}/contacts`, { kind: "vendor", name: "Paid-From Vendor" }))
+      .body.id;
+    expenseId = (await owner.json("GET", `${base()}/accounts`)).body.data.find(
+      (a: any) => a.type === "expense",
+    ).id;
+    const all = (await owner.json("GET", `${base()}/accounts`)).body.data;
+    const first = (type: string, subtype: string) =>
+      all.find((a: any) => a.type === type && a.subtype === subtype);
+    ids = {
+      liability: first("liability", "other_current_liability").id,
+      equity: first("equity", "owner_equity").id,
+      asset: first("asset", "other_current_asset").id,
+      ap: first("liability", "accounts_payable").id,
+      ar: first("asset", "accounts_receivable").id,
+      income: first("income", "other").id,
+      expense: expenseId,
+      fixed: first("asset", "fixed_asset").id,
+    };
+  });
+
+  async function newBill(amount: number, date = "2026-05-01") {
+    const b = await owner.json("POST", `${base()}/bills`, {
+      vendor_id: payVendor,
+      issue_date: date,
+      lines: [{ description: "Owner-paid", amount, account_id: expenseId }],
+    });
+    if (b.status !== 201) throw new Error(JSON.stringify(b.body));
+    return b.body.bill.id as string;
+  }
+  const payBill = (billId: string, amount: number, accountId: string, date = "2026-05-10") =>
+    owner.json("POST", `${base()}/payments`, {
+      direction: "sent",
+      contact_id: payVendor,
+      date,
+      amount,
+      account_id: accountId,
+      applications: [{ document_id: billId, amount }],
+    });
+
+  test("an other current liability settles a bill: Dr AP / Cr the account", async () => {
+    const billId = await newBill(50_000);
+    const p = await payBill(billId, 20_000, ids.liability);
+    expect(p.status).toBe(201);
+    expect((await owner.json("GET", `${base()}/bills/${billId}`)).body.status).toBe("partial");
+    const entry = (await owner.json("GET", `${base()}/entries/${p.body.entry_id ?? p.body.payment.entry_id}`))
+      .body;
+    const amt = (accountId: string) =>
+      entry.lines.find((l: any) => l.account_id === accountId)?.amount as number | undefined;
+    expect(amt(ids.ap)).toBe(20_000);
+    expect(amt(ids.liability)).toBe(-20_000);
+    expect((await payBill(billId, 30_000, ids.liability)).status).toBe(201);
+    expect((await owner.json("GET", `${base()}/bills/${billId}`)).body.status).toBe("paid");
+    const aging = (await owner.json("GET", `${base()}/reports/ap_aging?as_of=2026-06-30`)).body;
+    expect(aging.lines.find((l: any) => l.label === "Paid-From Vendor")).toBeUndefined();
+  });
+
+  test("owner equity and other current assets are accepted", async () => {
+    expect((await payBill(await newBill(1_000), 1_000, ids.equity)).status).toBe(201);
+    expect((await payBill(await newBill(1_000), 1_000, ids.asset)).status).toBe(201);
+  });
+
+  test("accounts payable, receivable, income, expense, and fixed assets are refused", async () => {
+    const billId = await newBill(1_000);
+    for (const k of ["ap", "ar", "income", "expense", "fixed"] as const) {
+      const r = await payBill(billId, 1_000, ids[k]);
+      expect(r.status).toBe(422);
+      expect(r.body.error?.code ?? r.body.code).toBe("invalid_account");
+    }
+    const inv = await newInvoice([1_000]);
+    await finalize(inv.id);
+    const r = await owner.json("POST", `${base()}/payments`, {
+      direction: "received",
+      contact_id: customer,
+      date: "2026-05-10",
+      amount: 1_000,
+      account_id: ids.ar,
+      applications: [{ document_id: inv.id, amount: 1_000 }],
+    });
+    expect(r.status).toBe(422);
+  });
+
+  test("a non-bank payment creates no bank reconciliation item", async () => {
+    const billId = await newBill(7_000);
+    await payBill(billId, 7_000, ids.liability);
+    const un = await owner.json("GET", `${base()}/accounts/${acct["1000"]}/unreconciled`);
+    expect(JSON.stringify(un.body)).not.toContain("Paid-From Vendor");
+  });
+
+  test("cash basis: expense lands on the payment date and the settlement moves no cash", async () => {
+    const cashOrg = await createOrg(env, owner, "Cash Liab Co", { basis: "cash" });
+    const cb = `/api/v1/orgs/${cashOrg}`;
+    const all = (await owner.json("GET", `${cb}/accounts`)).body.data;
+    const liab = all.find((a: any) => a.subtype === "other_current_liability").id;
+    const exp = all.find((a: any) => a.type === "expense" && a.subtype === "other").id;
+    const v = (await owner.json("POST", `${cb}/contacts`, { kind: "vendor", name: "V" })).body.id;
+    const bill = (
+      await owner.json("POST", `${cb}/bills`, {
+        vendor_id: v,
+        issue_date: "2026-01-05",
+        lines: [{ description: "x", amount: 40_000, account_id: exp }],
+      })
+    ).body.bill.id;
+    const p = await owner.json("POST", `${cb}/payments`, {
+      direction: "sent",
+      contact_id: v,
+      date: "2026-02-05",
+      amount: 40_000,
+      account_id: liab,
+      applications: [{ document_id: bill, amount: 40_000 }],
+    });
+    expect(p.status).toBe(201);
+    const pl = (from: string, to: string) =>
+      owner.json("GET", `${cb}/reports/profit_and_loss?from=${from}&to=${to}&basis=cash`);
+    expect(line((await pl("2026-01-01", "2026-01-31")).body, "Total Expenses")).toBe(0);
+    expect(line((await pl("2026-02-01", "2026-02-28")).body, "Total Expenses")).toBe(40_000);
+    for (const basis of ["cash", "accrual"]) {
+      const cf = (
+        await owner.json("GET", `${cb}/reports/cash_flow?from=2026-02-01&to=2026-02-28&basis=${basis}`)
+      ).body;
+      for (const val of Object.values(cf.checks)) expect(val).toBe(0);
+      expect(line(cf, "Net change in cash")).toBe(0);
+    }
+  });
+});

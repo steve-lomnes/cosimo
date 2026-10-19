@@ -67,6 +67,7 @@ Propose (each takes a `rationale`, which you see in Review):
 | `propose_replacement` | Reverses a posted entry and posts the corrected one, together (one review item) |
 | `propose_recurring_template` | Creates, changes, pauses, or resumes a recurring invoice, bill, or journal entry. A template that emails invoices to the customer always waits for a person, whatever the review policies say |
 | `record_invoice_payment` | Records a payment received from a customer against one or more of their open invoices, in full or in part; an amount beyond what is applied stays as customer credit. Pass `transaction_id` to record it from a bank deposit so the cash isn't counted twice. Refuses amounts beyond what is open (payments waiting in review count) |
+| `record_bill_payment` | Records a payment made to a vendor against one or more of their open bills, in full or in part. Takes the date, amount, and the account the money moved through: a bank, other current asset, credit card, other current liability, or owner's equity account. Refuses amounts beyond what is open (payments waiting in review count) |
 | `propose_payment_date_change` | Moves a payment to a new date: its entry is reversed on the old date and posted again on the new one; the documents it pays stay paid and a matched bank transaction stays matched (one review item) |
 
 Entries created by invoices, bills, and payments can't be reversed or replaced over MCP; void or

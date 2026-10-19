@@ -811,6 +811,107 @@ tool({
 });
 
 tool({
+  name: "record_bill_payment",
+  title: "Record a payment to a vendor against bills",
+  description:
+    "Propose recording a payment made to a vendor and applying it to one or more of that vendor's open bills, in full or in part. Give date, amount, and the account the money moved through: a bank, other current asset, credit card, other current liability, or owner's equity account (for example when the owner paid the bill personally). It waits in the review queue; approval posts Accounts Payable against the chosen account and moves each bill to partial or paid. Check list_bill_payments first for one already waiting. Refuses: amounts beyond what is open (payments waiting in review count), bills that are draft or void or belong to different vendors, and accounts money cannot move through (such as accounts payable, income, or expense).",
+  write: true,
+  money: true,
+  input: z.object({
+    bills: z
+      .array(
+        z.object({
+          bill: z.string().describe("Bill ID or bill number"),
+          amount: cents(
+            "Applied to this bill. Omit to apply the smaller of its open balance and what is left of the payment.",
+            "positive",
+          ).optional(),
+        }),
+      )
+      .min(1),
+    date: IsoDate,
+    amount: cents("The whole payment made.", "positive"),
+    account: z
+      .string()
+      .describe(
+        "ID or code of the account the money moved through: bank, other current asset, credit card, other current liability, or owner's equity.",
+      ),
+    method: z.string().max(100).optional(),
+    reference: z.string().max(200).optional().describe("For example a check number"),
+    memo: z.string().optional(),
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const accountRef = await accountId(t, i.account);
+    return t.scope.handle.write(async (tx) => {
+      // Resolve each bill by ID, else by bill number.
+      const rows: { id: string; number: string; vendorId: string; balance: number; amount: number }[] = [];
+      let left = i.amount;
+      for (const x of i.bills) {
+        const bill =
+          (await tx.select().from(org.bills).where(eq(org.bills.id, x.bill)).get()) ??
+          (await tx.select().from(org.bills).where(eq(org.bills.billNumber, x.bill)).get());
+        if (!bill) throw notFound(`Bill ${x.bill}`);
+        if (rows.some((r) => r.id === bill.id))
+          throw unprocessable("Apply to each bill once.", "duplicate_document");
+        if (rows.length && rows[0]!.vendorId !== bill.vendorId)
+          throw unprocessable(
+            "These bills belong to different vendors; record one payment per vendor.",
+            "contact_mismatch",
+          );
+        const { open, posted } = await openBalance(tx, "bill", bill.id, true);
+        const amount = x.amount ?? Math.min(open, left);
+        if (amount <= 0)
+          throw unprocessable(
+            `Nothing to apply to bill ${bill.billNumber ?? bill.id}: it has no open balance (payments waiting in review count; withdraw your own with withdraw_proposal if it was wrong), or the payment is already fully allocated.`,
+            "over_applied",
+          );
+        left -= amount;
+        rows.push({
+          id: bill.id,
+          number: bill.billNumber ?? "",
+          vendorId: bill.vendorId,
+          balance: bill.total - posted,
+          amount,
+        });
+      }
+      const applications = rows.map((r) => ({ document_id: r.id, amount: r.amount }));
+      const r = await recordPaymentTx(
+        tx,
+        t.scope.id,
+        t.scope.actor,
+        {
+          direction: "sent",
+          contact_id: rows[0]!.vendorId,
+          date: i.date,
+          amount: i.amount,
+          account_id: accountRef,
+          method: i.method ?? null,
+          reference: i.reference ?? null,
+          memo: i.memo ?? null,
+          applications,
+        },
+        { rationale: i.rationale, countPending: true },
+      );
+      const applied = rows.reduce((s, x) => s + x.amount, 0);
+      return {
+        ...outcome(r.result),
+        payment_id: r.payment.id,
+        amount: i.amount,
+        unapplied: i.amount - applied,
+        bills: rows.map((x) => ({
+          bill_id: x.id,
+          number: x.number,
+          applied: x.amount,
+          balance_due_after: x.balance - x.amount,
+        })),
+      };
+    });
+  },
+});
+
+tool({
   name: "withdraw_proposal",
   title: "Withdraw your own pending proposal",
   description:

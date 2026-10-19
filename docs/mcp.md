@@ -10,8 +10,9 @@ directly.
 
 **With OAuth (recommended).** In your AI client, add a connector (custom MCP server) with the URL
 `https://books.example.com/mcp`. The client finds the sign-in page by itself. You sign in to
-Cosimo, pick one organization, choose the access level, and approve. The access level can't be
-higher than your own role, and the default is Bookkeeper. Custom connectors in claude.ai need only
+Cosimo, check each organization the assistant may use, choose its access level in each, pick which
+of them is the default, and approve. An access level can't be higher than your own role in that
+organization, and it starts at Bookkeeper. Custom connectors in claude.ai need only
 the URL. If dynamic client registration is turned off, an admin registers a client with the
 redirect URI `https://claude.ai/api/mcp/auth_callback`, and you enter its client ID and secret in
 the connector's advanced settings.
@@ -19,9 +20,16 @@ the connector's advanced settings.
 **With an API token.** For scripts and clients without OAuth, create a token under Account →
 Personal API tokens, or with `cosimo token create`. Send it as `Authorization: Bearer <token>`.
 
-Each connection works with exactly one organization. See and disconnect your apps under Account →
-Connected AI apps. Owners see every app connected to their organization under Settings → AI
-connections.
+One connection can work with several organizations, with its own access level in each. Every tool
+except `list_orgs` takes an optional `org_id`; a call without one works in the connection's
+default organization, and a call naming an organization the connection doesn't cover is refused
+with a list of the ones it does. The assistant can't add organizations or change the default.
+
+See your apps under Account → Connected AI apps: disconnect one, remove a single organization from
+it (the others keep working), or change its default organization. Owners see every app connected
+to their organization under Settings → AI connections, and disconnecting one there removes only
+that organization. If you leave an organization, connections drop it and keep the rest. An API
+token still works with exactly one organization.
 
 ## What an assistant can do
 
@@ -29,7 +37,8 @@ Read:
 
 | Tool | What it returns |
 |---|---|
-| `list_orgs` | The organization and the connection's role |
+| `list_orgs` | The organizations the connection covers: each one's ID, name, currency, the connection's role there, and which is the default (`is_default`) |
+| `get_org_profile`, `get_org_notes` | The business profile and the bookkeeping notes, as markdown (the same as the resources below) |
 | `get_account_balances` | Chart of accounts with balances as of a date |
 | `run_report` | Any report (P&L, balance sheet, trial balance, cash flow, tax lines, general ledger, AR/AP aging, 1099) |
 | `get_cash_snapshot` | Cash and card balances, month/YTD P&L, review and categorize counts, overdue invoices, bills due soon, and each bank feed's sync status |
@@ -51,8 +60,9 @@ successful sync's `last_sync_added` / `_modified` / `_removed` counts, `connecti
 (`healthy`, `needs_reauth`, `error`, or `disconnected`), and `new_accounts_available`. Accounts
 without a bank feed have `null` in every one of these.
 
-Resources: `org://profile` (the business profile) and `org://notes` (bookkeeping notes). Edit both
-under Settings → Business profile.
+Resources: `org://profile` (the business profile) and `org://notes` (bookkeeping notes), for the
+default organization, and the templates `org://{org_id}/profile` and `org://{org_id}/notes` for any
+organization the connection covers. Edit both under Settings → Business profile.
 
 Propose (each takes a `rationale`, which you see in Review):
 
@@ -113,6 +123,9 @@ project instructions.
     Those clients get a secret.
   - Authorization uses the code flow with PKCE, and only `S256` is accepted. Codes are single-use
     and last 10 minutes. Replaying a code revokes the tokens it produced.
+  - One code, and the token pair it produces, covers every organization approved on the consent
+    screen, each with its own role. A refresh drops any organization the user is no longer a member
+    of, and fails only when none is left.
   - Access tokens last 1 hour. Refresh tokens last 30 days and rotate on every use, so an old
     refresh token stops working. Revoke a token with RFC 7009 at `POST /oauth/revoke`.
   - Redirect URIs must match exactly. `http://` is accepted only for `localhost`, `127.0.0.1` and

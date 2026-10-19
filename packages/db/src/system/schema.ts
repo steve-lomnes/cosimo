@@ -127,10 +127,8 @@ export const oauthCodes = sqliteTable("oauth_codes", {
   userId: text("user_id")
     .notNull()
     .references(() => users.id),
-  orgId: text("org_id")
-    .notNull()
-    .references(() => organizations.id),
-  role: text("role", { enum: ["owner", "bookkeeper", "accountant", "viewer"] }).notNull(),
+  /** The org that tools use when a call names none; one of the code's orgs. */
+  defaultOrgId: text("default_org_id").references(() => organizations.id),
   scope: text("scope").notNull(),
   codeChallenge: text("code_challenge").notNull(),
   redirectUri: text("redirect_uri").notNull(),
@@ -149,10 +147,8 @@ export const oauthTokens = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.id),
-    orgId: text("org_id")
-      .notNull()
-      .references(() => organizations.id),
-    role: text("role", { enum: ["owner", "bookkeeper", "accountant", "viewer"] }).notNull(),
+    /** The org that tools use when a call names none. Null when the user removed it and has more than one left. */
+    defaultOrgId: text("default_org_id").references(() => organizations.id),
     scope: text("scope").notNull(),
     accessTokenHash: text("access_token_hash").notNull().unique(),
     refreshTokenHash: text("refresh_token_hash").unique(),
@@ -162,7 +158,43 @@ export const oauthTokens = sqliteTable(
     createdAt: text("created_at").notNull().default(now),
     revokedAt: text("revoked_at"),
   },
-  (t) => [index("oauth_tokens_user_idx").on(t.userId), index("oauth_tokens_org_idx").on(t.orgId)],
+  (t) => [index("oauth_tokens_user_idx").on(t.userId)],
+);
+
+/** The orgs one authorization code covers, each with the role the user granted. */
+export const oauthCodeOrgs = sqliteTable(
+  "oauth_code_orgs",
+  {
+    codeHash: text("code_hash")
+      .notNull()
+      .references(() => oauthCodes.codeHash),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => organizations.id),
+    role: text("role", { enum: ["owner", "bookkeeper", "accountant", "viewer"] }).notNull(),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [primaryKey({ columns: [t.codeHash, t.orgId] })],
+);
+
+/**
+ * The orgs one connection (token pair) covers, each with a role cap. Each org can be revoked on its
+ * own; the connection stops working once none is left.
+ */
+export const oauthTokenOrgs = sqliteTable(
+  "oauth_token_orgs",
+  {
+    tokenId: text("token_id")
+      .notNull()
+      .references(() => oauthTokens.id),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => organizations.id),
+    role: text("role", { enum: ["owner", "bookkeeper", "accountant", "viewer"] }).notNull(),
+    createdAt: text("created_at").notNull().default(now),
+    revokedAt: text("revoked_at"),
+  },
+  (t) => [primaryKey({ columns: [t.tokenId, t.orgId] }), index("oauth_token_orgs_org_idx").on(t.orgId)],
 );
 
 export const instanceSettings = sqliteTable("instance_settings", {

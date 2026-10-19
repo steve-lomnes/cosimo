@@ -58,8 +58,18 @@ async function register(name = "Test AI", uris = [REDIRECT]) {
   return r.body.client_id as string;
 }
 
-/** Full authorization-code flow as `user`, returning tokens. */
+/** Full authorization-code flow as `user` for one org (also the default), returning tokens. */
 async function authorize(user: Client, clientId: string, org = orgId, role = "bookkeeper") {
+  return authorizeOrgs(user, clientId, [{ org_id: org, role }], org);
+}
+
+/** Full authorization-code flow covering several orgs, with `defaultOrg` picked as the default. */
+async function authorizeOrgs(
+  user: Client,
+  clientId: string,
+  orgs: { org_id: string; role: string }[],
+  defaultOrg: string,
+) {
   const { verifier, challenge } = pkce();
   const q = {
     client_id: clientId,
@@ -76,8 +86,8 @@ async function authorize(user: Client, clientId: string, org = orgId, role = "bo
   const consent = await user.json("POST", "/api/v1/oauth/consent", {
     ...q,
     approve: true,
-    org_id: org,
-    role,
+    orgs,
+    default_org_id: defaultOrg,
   });
   expect(consent.status).toBe(200);
   const back = new URL(consent.body.redirect_to);
@@ -97,6 +107,9 @@ async function authorize(user: Client, clientId: string, org = orgId, role = "bo
   );
   return { tok, code, verifier };
 }
+
+/** Consent body fields for one org that is also the default. */
+const only = (org: string) => ({ orgs: [{ org_id: org }], default_org_id: org });
 
 async function mcp(
   token: string | null,
@@ -274,7 +287,11 @@ describe("OAuth 2.1", () => {
     const start = await raw("GET", `/oauth/authorize?${new URLSearchParams(q)}`);
     expect(start.status).toBe(302);
     expect(start.headers.get("location")).toStartWith("/connect?");
-    const consent = await owner.json("POST", "/api/v1/oauth/consent", { ...q, approve: true, org_id: orgId });
+    const consent = await owner.json("POST", "/api/v1/oauth/consent", {
+      ...q,
+      approve: true,
+      ...only(orgId),
+    });
     expect(consent.status).toBe(200);
     const back = new URL(consent.body.redirect_to);
     expect(back.origin + back.pathname).toBe(CLAUDE);
@@ -347,7 +364,11 @@ describe("OAuth 2.1", () => {
     const { tok } = await authorize(owner, clientId).then(async (x) => x);
     expect(tok.status).toBe(200);
     const q = { ...base, redirect_uri: REDIRECT };
-    const consent = await owner.json("POST", "/api/v1/oauth/consent", { ...q, approve: true, org_id: orgId });
+    const consent = await owner.json("POST", "/api/v1/oauth/consent", {
+      ...q,
+      approve: true,
+      ...only(orgId),
+    });
     const code = new URL(consent.body.redirect_to).searchParams.get("code")!;
     const wrong = await raw(
       "POST",
@@ -390,7 +411,7 @@ describe("OAuth 2.1", () => {
       code_challenge_method: "S256",
     };
     expect(
-      (await viewer.json("POST", "/api/v1/oauth/consent", { ...q, approve: true, org_id: otherOrg })).status,
+      (await viewer.json("POST", "/api/v1/oauth/consent", { ...q, approve: true, ...only(otherOrg) })).status,
     ).toBe(403);
   });
 
@@ -399,7 +420,11 @@ describe("OAuth 2.1", () => {
     const { tok } = await authorize(viewer, clientId);
     const mine = await viewer.json("GET", "/api/v1/oauth/connections");
     const c = mine.body.data.find((x: any) => x.client_id === clientId);
-    expect(c).toMatchObject({ client_name: "Connections AI", org_id: orgId, role: "viewer" });
+    expect(c).toMatchObject({
+      client_name: "Connections AI",
+      default_org_id: orgId,
+      orgs: [expect.objectContaining({ org_id: orgId, org_name: "Acme LLC", role: "viewer" })],
+    });
     const orgView = await owner.json("GET", `/api/v1/orgs/${orgId}/oauth/connections`);
     expect(orgView.body.data.some((x: any) => x.id === c.id)).toBe(true);
     expect((await viewer.json("GET", `/api/v1/orgs/${orgId}/oauth/connections`)).status).toBe(403);
@@ -439,7 +464,11 @@ describe("OAuth 2.1", () => {
       code_challenge: challenge,
       code_challenge_method: "S256",
     };
-    const consent = await owner.json("POST", "/api/v1/oauth/consent", { ...q, approve: true, org_id: orgId });
+    const consent = await owner.json("POST", "/api/v1/oauth/consent", {
+      ...q,
+      approve: true,
+      ...only(orgId),
+    });
     const code = new URL(consent.body.redirect_to).searchParams.get("code")!;
     const form = {
       grant_type: "authorization_code",
@@ -2125,5 +2154,394 @@ describe("MCP", () => {
       // The withdrawn change no longer blocks a new one.
       expect((await update()).structuredContent.status).toBe("pending_review");
     });
+  });
+});
+
+describe("one connection, several organizations", () => {
+  let multi: Client;
+  let alpha: string; // multi is a bookkeeper
+  let beta: string; // multi is a viewer
+  let gamma: string; // multi is an accountant, but never grants it
+  const q = () => ({
+    redirect_uri: REDIRECT,
+    response_type: "code",
+    code_challenge: pkce().challenge,
+    code_challenge_method: "S256",
+  });
+  const refresh = (clientId: string, refresh_token: string) =>
+    raw(
+      "POST",
+      "/oauth/token",
+      new URLSearchParams({ grant_type: "refresh_token", refresh_token, client_id: clientId }),
+    );
+  const twoOrgs = (clientId: string, defaultOrg = alpha) =>
+    authorizeOrgs(
+      multi,
+      clientId,
+      [
+        { org_id: alpha, role: "bookkeeper" },
+        { org_id: beta, role: "owner" },
+      ],
+      defaultOrg,
+    );
+  const myConnection = async (clientId: string) =>
+    (await multi.json("GET", "/api/v1/oauth/connections")).body.data.find(
+      (x: any) => x.client_id === clientId,
+    );
+
+  beforeAll(async () => {
+    multi = await login(env, "multi@example.com");
+    alpha = await createOrg(env, owner, "Alpha Books");
+    beta = await createOrg(env, owner, "Beta Books");
+    gamma = await createOrg(env, owner, "Gamma Books");
+    await addMember(env, alpha, multi.userId, "bookkeeper");
+    await addMember(env, beta, multi.userId, "viewer");
+    await addMember(env, gamma, multi.userId, "accountant");
+    const h = await env.ctx.orgs.mustOpen(beta);
+    await h.write((tx) => tx.update(org.orgSettings).set({ baseCurrency: "EUR" }));
+    await owner.json("PUT", `/api/v1/orgs/${alpha}/profile`, { description: "Alpha does audits" });
+    await owner.json("PUT", `/api/v1/orgs/${beta}/profile`, { description: "Beta sells bikes" });
+  });
+
+  test("consent needs at least one org and an explicit default among the checked ones", async () => {
+    const clientId = await register("Picky AI");
+    const info = await multi.json(
+      "GET",
+      `/api/v1/oauth/consent?${new URLSearchParams({ client_id: clientId, ...q() })}`,
+    );
+    expect(info.body.orgs.map((o: any) => [o.name, o.grantable_roles])).toEqual([
+      ["Alpha Books", ["bookkeeper", "accountant", "viewer"]],
+      ["Beta Books", ["viewer"]],
+      ["Gamma Books", ["accountant", "viewer"]],
+    ]);
+    const post = (body: Record<string, unknown>) =>
+      multi.json("POST", "/api/v1/oauth/consent", { client_id: clientId, ...q(), approve: true, ...body });
+    const both = [{ org_id: alpha }, { org_id: beta }];
+    expect((await post({ orgs: both })).status).toBe(400);
+    const outside = await post({ orgs: both, default_org_id: gamma });
+    expect(outside.status).toBe(400);
+    expect(outside.body.error.message).toContain("default organization");
+    expect((await post({ orgs: [], default_org_id: alpha })).status).toBe(400);
+    expect((await post({ orgs: [{ org_id: alpha }, { org_id: alpha }], default_org_id: alpha })).status).toBe(
+      400,
+    );
+    // An org the user isn't in can't be slipped in next to ones they are.
+    expect((await post({ orgs: [{ org_id: alpha }, { org_id: orgId }], default_org_id: alpha })).status).toBe(
+      403,
+    );
+  });
+
+  test("two orgs with different roles, each capped; nothing outside the grant set is reachable", async () => {
+    const clientId = await register("Two Org AI");
+    const { tok } = await twoOrgs(clientId);
+    expect(tok.status).toBe(200);
+    const t = tok.body.access_token as string;
+
+    // REST: both granted orgs read; a member org that wasn't granted and a foreign org are refused.
+    const api = tokenClient(env, t);
+    expect((await api.json("GET", `/api/v1/orgs/${alpha}/accounts`)).status).toBe(200);
+    expect((await api.json("GET", `/api/v1/orgs/${beta}/accounts`)).status).toBe(200);
+    expect((await api.json("GET", `/api/v1/orgs/${gamma}/accounts`)).status).toBe(403);
+    expect((await api.json("GET", `/api/v1/orgs/${orgId}/accounts`)).status).toBe(403);
+    const listed = (await api.json("GET", "/api/v1/orgs")).body.data.map((o: any) => o.id);
+    expect(listed.sort()).toEqual([alpha, beta].sort());
+
+    // list_orgs: the granted orgs only, with role, currency, and the default.
+    const r = await call(t, "list_orgs", {});
+    expect(r.structuredContent).toEqual({
+      default_org_id: alpha,
+      orgs: [
+        {
+          id: alpha,
+          name: "Alpha Books",
+          currency: "USD",
+          role: "bookkeeper",
+          is_default: true,
+          propose_only: true,
+        },
+        // Beta was requested as owner, but multi is only a viewer there.
+        {
+          id: beta,
+          name: "Beta Books",
+          currency: "EUR",
+          role: "viewer",
+          is_default: false,
+          propose_only: true,
+        },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain("Gamma");
+
+    const c = await myConnection(clientId);
+    expect(c.default_org_id).toBe(alpha);
+    expect(c.orgs.map((o: any) => [o.org_name, o.role])).toEqual([
+      ["Alpha Books", "bookkeeper"],
+      ["Beta Books", "viewer"],
+    ]);
+    // An owner of one org sees only that org's grant, and no default.
+    const ownerView = await owner.json("GET", `/api/v1/orgs/${beta}/oauth/connections`);
+    const seen = ownerView.body.data.find((x: any) => x.id === c.id);
+    expect(seen.orgs.map((o: any) => o.org_id)).toEqual([beta]);
+    expect(seen.default_org_id).toBeNull();
+  });
+
+  test("tools take an optional org_id: the default when omitted, refused outside the grants", async () => {
+    const t = (await twoOrgs(await register("Org Arg AI"))).tok.body.access_token as string;
+    const tools = (await mcp(t, "tools/list")).body.result.tools as { name: string; inputSchema: any }[];
+    for (const x of tools) {
+      if (x.name === "list_orgs") expect(x.inputSchema.properties.org_id).toBeUndefined();
+      else expect(x.inputSchema.properties.org_id).toMatchObject({ type: "string" });
+      expect(x.inputSchema.required ?? []).not.toContain("org_id");
+    }
+    for (const word of ["default", "grant", "switch"])
+      expect(tools.some((x) => x.name.includes(word))).toBe(false);
+
+    const n = await call(t, "append_note", { note: "Alpha's retainers go to 4000." });
+    expect(n.isError).toBe(false);
+    const alphaNotes = (await owner.json("GET", `/api/v1/orgs/${alpha}/notes`)).body.data;
+    expect(alphaNotes.some((x: any) => x.body_md.includes("Alpha's retainers"))).toBe(true);
+
+    for (const other of [gamma, orgId, "not-an-org"]) {
+      const refused = await call(t, "get_account_balances", { org_id: other });
+      expect(refused.isError).toBe(true);
+      const text = refused.content[0]!.text;
+      expect(text).toContain(`not authorized for organization ${other}`);
+      expect(text).toContain(`Alpha Books (org_id ${alpha}, default)`);
+      expect(text).toContain(`Beta Books (org_id ${beta})`);
+      expect(text).not.toContain("Gamma");
+    }
+    const inBeta = await call(t, "get_account_balances", { org_id: beta });
+    expect(inBeta.isError).toBe(false);
+  });
+
+  test("roles apply per org: bookkeeper in one, viewer in the other", async () => {
+    const t = (await twoOrgs(await register("Gate AI"))).tok.body.access_token as string;
+    const a = await call(t, "create_contact", { org_id: alpha, kind: "vendor", name: "Alpha Vendor" });
+    expect(a.isError).toBe(false);
+    const b = await call(t, "create_contact", { org_id: beta, kind: "vendor", name: "Beta Vendor" });
+    expect(b.isError).toBe(true);
+    expect(b.content[0]!.text).toContain("read-only in this organization");
+    const entry = await call(t, "create_manual_entry", {
+      org_id: beta,
+      date: "2026-06-30",
+      lines: [
+        { account: "1000", amount: 100 },
+        { account: "3100", amount: -100 },
+      ],
+      rationale: "Should be refused in Beta",
+    });
+    expect(entry.isError).toBe(true);
+    // Reads work in both.
+    expect((await call(t, "list_contacts", { org_id: beta })).isError).toBe(false);
+  });
+
+  test("get_org_profile, get_org_notes, and org://{org_id}/ resources", async () => {
+    const t = (await twoOrgs(await register("Profile AI"))).tok.body.access_token as string;
+    const pa = await call(t, "get_org_profile", {});
+    expect(pa.structuredContent.org_id).toBe(alpha);
+    expect(pa.structuredContent.profile).toContain("# Alpha Books");
+    expect(pa.structuredContent.profile).toContain("Alpha does audits");
+    const pb = await call(t, "get_org_profile", { org_id: beta });
+    expect(pb.structuredContent.profile).toContain("Beta sells bikes");
+    expect((await call(t, "get_org_profile", { org_id: gamma })).isError).toBe(true);
+
+    await call(t, "append_note", { note: "Alpha bills monthly in arrears." });
+    const na = await call(t, "get_org_notes", {});
+    expect(na.structuredContent.notes).toContain("monthly in arrears");
+    const nb = await call(t, "get_org_notes", { org_id: beta });
+    expect(nb.structuredContent.org_id).toBe(beta);
+    expect(nb.structuredContent.notes).not.toContain("monthly in arrears");
+
+    const templates = (await mcp(t, "resources/templates/list")).body.result.resourceTemplates.map(
+      (r: any) => r.uriTemplate,
+    );
+    expect(templates).toEqual(["org://{org_id}/profile", "org://{org_id}/notes"]);
+    const def = await mcp(t, "resources/read", { uri: "org://profile" });
+    expect(def.body.result.contents[0].text).toContain("Alpha does audits");
+    const named = await mcp(t, "resources/read", { uri: `org://${beta}/profile` });
+    expect(named.body.result.contents[0]).toMatchObject({ uri: `org://${beta}/profile` });
+    expect(named.body.result.contents[0].text).toContain("Beta sells bikes");
+    expect(
+      (await mcp(t, "resources/read", { uri: `org://${beta}/notes` })).body.result.contents[0].text,
+    ).not.toContain("monthly in arrears");
+    const refused = await mcp(t, "resources/read", { uri: `org://${gamma}/profile` });
+    expect(refused.body.error.code).toBe(-32002);
+    expect(refused.body.error.message).toContain("not authorized");
+  });
+
+  test("only the user changes the default, from their account", async () => {
+    const clientId = await register("Default AI");
+    const t = (await twoOrgs(clientId)).tok.body.access_token as string;
+    const c = await myConnection(clientId);
+    // Not through the OAuth token, not by someone else, and only to a granted org.
+    expect(
+      (await tokenClient(env, t).json("PATCH", `/api/v1/oauth/connections/${c.id}`, { default_org_id: beta }))
+        .status,
+    ).toBe(403);
+    expect(
+      (await owner.json("PATCH", `/api/v1/oauth/connections/${c.id}`, { default_org_id: beta })).status,
+    ).toBe(404);
+    expect(
+      (await multi.json("PATCH", `/api/v1/oauth/connections/${c.id}`, { default_org_id: gamma })).status,
+    ).toBe(400);
+    expect(
+      (await multi.json("PATCH", `/api/v1/oauth/connections/${c.id}`, { default_org_id: beta })).status,
+    ).toBe(200);
+    const r = await call(t, "list_orgs", {});
+    expect(r.structuredContent.default_org_id).toBe(beta);
+    expect((await call(t, "get_org_profile", {})).structuredContent.org_id).toBe(beta);
+  });
+
+  test("one org can be removed and the rest keep working; removing the last disconnects", async () => {
+    const clientId = await register("Revoke AI");
+    const t = (await twoOrgs(clientId, beta)).tok.body.access_token as string;
+    const c = await myConnection(clientId);
+    // Someone who isn't the user and doesn't own that org can't touch it.
+    const other = await login(env, "stranger@example.com");
+    expect((await other.json("DELETE", `/api/v1/oauth/connections/${c.id}/orgs/${beta}`)).status).toBe(404);
+    expect((await multi.json("DELETE", `/api/v1/oauth/connections/${c.id}/orgs/${gamma}`)).status).toBe(404);
+
+    expect((await multi.json("DELETE", `/api/v1/oauth/connections/${c.id}/orgs/${beta}`)).status).toBe(200);
+    expect((await call(t, "list_contacts", { org_id: beta })).isError).toBe(true);
+    expect((await tokenClient(env, t).json("GET", `/api/v1/orgs/${beta}/accounts`)).status).toBe(403);
+    // Beta was the default; with only Alpha left, Alpha is used.
+    const r = await call(t, "list_orgs", {});
+    expect(r.structuredContent.orgs.map((o: any) => o.id)).toEqual([alpha]);
+    expect(r.structuredContent.default_org_id).toBe(alpha);
+    expect((await call(t, "list_contacts", {})).isError).toBe(false);
+    expect((await myConnection(clientId)).orgs.map((o: any) => o.org_id)).toEqual([alpha]);
+
+    expect((await multi.json("DELETE", `/api/v1/oauth/connections/${c.id}/orgs/${alpha}`)).status).toBe(200);
+    expect((await mcp(t, "ping")).status).toBe(401);
+    expect(await myConnection(clientId)).toBeUndefined();
+  });
+
+  test("with the default removed and several orgs left, calls must name an org until the user picks one", async () => {
+    const clientId = await register("Three Org AI");
+    const { tok } = await authorizeOrgs(
+      multi,
+      clientId,
+      [
+        { org_id: alpha, role: "viewer" },
+        { org_id: beta, role: "viewer" },
+        { org_id: gamma, role: "viewer" },
+      ],
+      gamma,
+    );
+    const t = tok.body.access_token as string;
+    const c = await myConnection(clientId);
+    await multi.json("DELETE", `/api/v1/oauth/connections/${c.id}/orgs/${gamma}`);
+    const r = await call(t, "list_contacts", {});
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("no default organization");
+    expect((await call(t, "list_contacts", { org_id: beta })).isError).toBe(false);
+    expect((await myConnection(clientId)).default_org_id).toBeNull();
+  });
+
+  test("an owner disconnecting someone's connection removes only the orgs that owner owns", async () => {
+    const own = await createOrg(env, multi, "Multi's Own Co");
+    const clientId = await register("Shared AI");
+    const t = (
+      await authorizeOrgs(
+        multi,
+        clientId,
+        [
+          { org_id: alpha, role: "bookkeeper" },
+          { org_id: own, role: "owner" },
+        ],
+        own,
+      )
+    ).tok.body.access_token as string;
+    const c = await myConnection(clientId);
+    expect((await owner.json("DELETE", `/api/v1/oauth/connections/${c.id}`)).status).toBe(200);
+    expect((await call(t, "list_contacts", { org_id: alpha })).isError).toBe(true);
+    expect((await call(t, "list_contacts", {})).isError).toBe(false);
+    expect((await myConnection(clientId)).orgs.map((o: any) => o.org_id)).toEqual([own]);
+  });
+
+  test("a replayed multi-org code revokes the connection it produced", async () => {
+    const clientId = await register("Replay AI");
+    const { tok, code, verifier } = await twoOrgs(clientId);
+    const replay = await raw(
+      "POST",
+      "/oauth/token",
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: REDIRECT,
+        client_id: clientId,
+        code_verifier: verifier,
+      }),
+    );
+    expect(replay.body.error).toBe("invalid_grant");
+    expect((await mcp(tok.body.access_token, "ping")).status).toBe(401);
+  });
+
+  test("deleting an org removes it from connections; the other orgs keep working", async () => {
+    const doomed = await createOrg(env, multi, "Doomed Co");
+    const clientId = await register("Doomed AI");
+    const { tok } = await authorizeOrgs(
+      multi,
+      clientId,
+      [
+        { org_id: alpha, role: "bookkeeper" },
+        { org_id: doomed, role: "owner" },
+      ],
+      doomed,
+    );
+    await env.ctx.orgs.destroy(doomed);
+    const r = await call(tok.body.access_token, "list_orgs", {});
+    expect(r.structuredContent).toMatchObject({ default_org_id: alpha, orgs: [{ id: alpha }] });
+    expect((await myConnection(clientId)).orgs.map((o: any) => o.org_id)).toEqual([alpha]);
+  });
+
+  test("leaving an org drops it at once; on refresh, orgs whose membership is gone are dropped too", async () => {
+    // Removing a member through the API revokes that org's grant right away.
+    const viaApi = await register("Leave AI");
+    const t1 = (await twoOrgs(viaApi)).tok.body.access_token as string;
+    const delta = await createOrg(env, owner, "Delta Books");
+    await addMember(env, delta, multi.userId, "bookkeeper");
+    const t2 = (
+      await authorizeOrgs(
+        multi,
+        viaApi,
+        [
+          { org_id: alpha, role: "bookkeeper" },
+          { org_id: delta, role: "bookkeeper" },
+        ],
+        delta,
+      )
+    ).tok.body.access_token as string;
+    expect((await owner.json("DELETE", `/api/v1/orgs/${delta}/members/${multi.userId}`)).status).toBe(200);
+    expect((await call(t2, "list_contacts", { org_id: delta })).isError).toBe(true);
+    // Delta was the default; Alpha is the only org left, so it is used.
+    expect((await call(t2, "list_orgs", {})).structuredContent.default_org_id).toBe(alpha);
+    expect((await call(t2, "list_contacts", {})).isError).toBe(false);
+    expect((await call(t1, "list_contacts", {})).isError).toBe(false);
+
+    // A membership that disappears some other way: the org stops answering, and refresh drops it.
+    const clientId = await register("Refresh AI");
+    const { tok } = await twoOrgs(clientId);
+    const { system } = await import("@cosimo/db");
+    const { and, eq } = await import("drizzle-orm");
+    const removeMembership = (o: string) =>
+      env.ctx.system.write((tx) =>
+        tx
+          .delete(system.memberships)
+          .where(and(eq(system.memberships.userId, multi.userId), eq(system.memberships.orgId, o))),
+      );
+    await removeMembership(beta);
+    expect((await call(tok.body.access_token, "list_contacts", { org_id: beta })).isError).toBe(true);
+    const r1 = await refresh(clientId, tok.body.refresh_token);
+    expect(r1.status).toBe(200);
+    expect((await myConnection(clientId)).orgs.map((o: any) => o.org_id)).toEqual([alpha]);
+    expect((await call(r1.body.access_token, "list_contacts", {})).isError).toBe(false);
+
+    await removeMembership(alpha);
+    const r2 = await refresh(clientId, r1.body.refresh_token);
+    expect(r2.body.error).toBe("invalid_grant");
+    expect(r2.body.error_description).toContain("no longer a member");
+    expect(await myConnection(clientId)).toBeUndefined();
+    expect((await mcp(r1.body.access_token, "ping")).status).toBe(401);
   });
 });

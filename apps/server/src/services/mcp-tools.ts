@@ -2,6 +2,10 @@
  * MCP tools (SPEC §10.2). Each tool validates its input with zod (which also yields the JSON Schema
  * published in `tools/list`) and calls the same services as the REST API, as the `mcp` actor.
  *
+ * A connection can cover several orgs. Every tool but list_orgs takes an optional `org_id` (the
+ * connection's default when omitted) and runs in that org's scope, with that org's role; an org
+ * outside the connection's grants is refused. No tool changes the grants or the default.
+ *
  * Writes go through the review policy like any other writer; for the `mcp` actor the default is
  * review, and OAuth grants are always propose-only. Every write tool that touches the books takes
  * a `rationale` and returns the review item ID and status. Corrections to posted entries (reverse,
@@ -13,8 +17,8 @@
  * reject, void, delete, or move lock dates.
  */
 import type { LineInput } from "@cosimo/core";
-import { org } from "@cosimo/db";
-import { ON_DUE_DATE, TERM_PRESETS } from "@cosimo/shared";
+import { org, system } from "@cosimo/db";
+import { ON_DUE_DATE, type Role, TERM_PRESETS } from "@cosimo/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { AppContext } from "../context.ts";
@@ -48,7 +52,14 @@ import {
 import { assertNoPendingReplacement, proposeReplacementTx } from "./entry-replacement-review.ts";
 import { holdInvoiceDraftTx } from "./invoice-review.ts";
 import { getEntry, listEntries, reverseEntryTx, submitEntryTx } from "./ledger.ts";
-import { appendNoteTx } from "./notes.ts";
+import {
+  accountNamesByCode,
+  appendNoteTx,
+  getProfile,
+  listNotes,
+  notesMarkdown,
+  profileMarkdown,
+} from "./notes.ts";
 import { payLinker } from "./online-payments.ts";
 import { proposePaymentRedateTx } from "./payment-redate-review.ts";
 import { syncForAssistant } from "./plaid.ts";
@@ -66,12 +77,33 @@ import { REPORT_KEYS, runReport } from "./reports.ts";
 import { listReview, mustGetReview, reviewView, withdrawReviewTx } from "./review.ts";
 import { createRuleTx } from "./rules.ts";
 
+/** One org a connection can use, with the user's membership still in place. */
+export interface ConnOrg {
+  id: string;
+  /** The connection's role cap for this org, already capped at the user's membership role. */
+  role: Role;
+}
+
+/**
+ * The connection behind one MCP request: the orgs it covers (granted and still a member) and its
+ * default. Every org-scoped call goes through `scope()`, which refuses any org outside the grant set.
+ */
+export interface McpConn {
+  ctx: AppContext;
+  orgs: ConnOrg[];
+  defaultOrgId: string | null;
+  proposeOnly: boolean;
+  /** The scope for `orgId`, or the default org when omitted. Throws, naming the covered orgs, otherwise. */
+  scope(orgId?: string): Promise<OrgScope>;
+}
+
 export interface ToolCtx {
   ctx: AppContext;
+  conn: McpConn;
   scope: OrgScope;
 }
 
-interface Tool<S extends z.ZodType> {
+interface ToolBase<S extends z.ZodObject> {
   name: string;
   title: string;
   description: string;
@@ -79,16 +111,45 @@ interface Tool<S extends z.ZodType> {
   /** Whether the tool's inputs or results carry amounts; if so, `tool()` adds the cents note. */
   money: boolean;
   write?: boolean;
+}
+/** Works in one org: `tool()` adds an optional `org_id`, and `run` gets that org's scope. */
+interface OrgTool<S extends z.ZodObject> extends ToolBase<S> {
+  global?: false;
   run(t: ToolCtx, input: z.output<S>): Promise<unknown>;
 }
+/** About the connection itself rather than one org (list_orgs). */
+interface ConnTool<S extends z.ZodObject> extends ToolBase<S> {
+  global: true;
+  run(c: McpConn, input: z.output<S>): Promise<unknown>;
+}
+type Tool<S extends z.ZodObject> = OrgTool<S> | ConnTool<S>;
 
-const tools: Tool<z.ZodType>[] = [];
+const tools: Tool<z.ZodObject>[] = [];
 /** Appended to the description of every tool with `money: true`. */
 export const MONEY_NOTE =
   "All amounts, in inputs and results, are integer cents in the org's currency (123456 = $1,234.56); divide by 100 before showing them to a person.";
-function tool<S extends z.ZodType>(t: Tool<S>) {
+const OrgIdArg = z
+  .string()
+  .optional()
+  .describe(
+    "Organization ID from list_orgs. Omit it to use this connection's default organization; an organization the connection doesn't cover is refused.",
+  );
+function tool<S extends z.ZodObject>(t: Tool<S>) {
   const description = t.money ? `${t.description} ${MONEY_NOTE}` : t.description;
-  tools.push({ ...t, description } as unknown as Tool<z.ZodType>);
+  const input = t.global ? t.input : t.input.extend({ org_id: OrgIdArg });
+  tools.push({ ...t, description, input } as unknown as Tool<z.ZodObject>);
+}
+
+/** "Acme LLC (org_id …, default); Other Co (org_id …)": what an org error tells the assistant. */
+export async function describeOrgs(conn: Pick<McpConn, "ctx" | "orgs" | "defaultOrgId">) {
+  const parts: string[] = [];
+  for (const o of conn.orgs) {
+    const reg = await conn.ctx.orgs.get(o.id);
+    parts.push(`${reg?.name ?? o.id} (org_id ${o.id}${o.id === conn.defaultOrgId ? ", default" : ""})`);
+  }
+  return parts.length
+    ? `This connection covers: ${parts.join("; ")}.`
+    : "This connection covers no organization.";
 }
 
 const Rationale = z
@@ -121,7 +182,9 @@ const EntryLines = z
 
 function requireWriter(t: ToolCtx) {
   if (t.scope.role !== "owner" && t.scope.role !== "bookkeeper")
-    throw forbidden("This connection is read-only (its role is not Owner or Bookkeeper).");
+    throw forbidden(
+      `This connection is read-only in this organization (its role here is ${t.scope.role}, not Owner or Bookkeeper).`,
+    );
 }
 
 /** Accept an account ID or code. */
@@ -215,21 +278,74 @@ tool({
   name: "list_orgs",
   title: "List organizations",
   description:
-    "The one organization this connection can access, and your role in it. Call this first if you're unsure which org or role you have. To work with a different org, the person must approve a new connection; there is no tool to switch.",
+    "The organizations this connection covers: for each, its id, name, currency, your role in it, and whether it is the default (is_default). Every other tool takes an optional org_id; omit it to use the default organization. Call this first if you're unsure which org or role you have. Only the person can change the default or which organizations this connection covers (in Cosimo, under Account); no tool can.",
+  money: false,
+  global: true,
+  input: z.object({}),
+  async run(c) {
+    const orgs = [];
+    for (const o of c.orgs) {
+      const reg = await c.ctx.orgs.get(o.id);
+      const handle = await c.ctx.orgs.open(o.id);
+      const settings = handle
+        ? await handle.db.select({ currency: org.orgSettings.baseCurrency }).from(org.orgSettings).get()
+        : undefined;
+      orgs.push({
+        id: o.id,
+        name: reg?.name ?? "",
+        currency: settings?.currency ?? "USD",
+        role: o.role,
+        is_default: o.id === c.defaultOrgId,
+        propose_only: c.proposeOnly,
+      });
+    }
+    return { orgs, default_org_id: c.defaultOrgId };
+  },
+});
+
+async function userNames(t: ToolCtx, ids: string[]) {
+  const rows = await t.ctx.system.db
+    .select({ id: system.users.id, email: system.users.email, name: system.users.name })
+    .from(system.users)
+    .where(inArray(system.users.id, ids))
+    .all();
+  return new Map(rows.map((u) => [u.id, u.name || u.email]));
+}
+
+/** The business profile as markdown: the `org://profile` resource and get_org_profile. */
+export async function orgProfileMarkdown(t: ToolCtx) {
+  const db = t.scope.handle.db;
+  const p = await getProfile(db);
+  const reg = await t.ctx.orgs.get(t.scope.id);
+  return `# ${reg?.name ?? "Business"}\n\n${profileMarkdown(p.profile, await accountNamesByCode(db))}`;
+}
+
+/** The bookkeeping notes as markdown: the `org://notes` resource and get_org_notes. */
+export async function orgNotesMarkdown(t: ToolCtx) {
+  return notesMarkdown(await listNotes(t.scope.handle.db, (ids) => userNames(t, ids)));
+}
+
+tool({
+  name: "get_org_profile",
+  title: "Business profile",
+  description:
+    "What the business does, how it bills, typical customers and vendors, and which accounts to use for recurring items, as markdown (the same as the org://profile resource). Read this before working in an organization.",
   money: false,
   input: z.object({}),
   async run(t) {
-    const reg = await t.ctx.orgs.get(t.scope.id);
-    return {
-      orgs: [
-        {
-          id: t.scope.id,
-          name: reg?.name ?? "",
-          role: t.scope.role,
-          propose_only: t.scope.actor.proposeOnly ?? false,
-        },
-      ],
-    };
+    return { org_id: t.scope.id, profile: await orgProfileMarkdown(t) };
+  },
+});
+
+tool({
+  name: "get_org_notes",
+  title: "Bookkeeping notes",
+  description:
+    "Dated, attributed notes on how this business books things, newest first, as markdown (the same as the org://notes resource). Add to them with append_note.",
+  money: false,
+  input: z.object({}),
+  async run(t) {
+    return { org_id: t.scope.id, notes: await orgNotesMarkdown(t) };
   },
 });
 
@@ -237,7 +353,7 @@ tool({
   name: "get_account_balances",
   title: "Chart of accounts with balances",
   description:
-    "Every account (id, code, name, type, subtype, tax line, parent_id) with its posted balance as of a date. Balances are debit-positive and cover the account's own postings only; a parent's balance excludes its sub-accounts (those with parent_id set to it), which share its type, subtype, and tax line. Use this for the chart of accounts and current balances; for a full P&L or balance sheet, or history over a range, use run_report instead. Read org://profile first to learn which accounts this business uses.",
+    "Every account (id, code, name, type, subtype, tax line, parent_id) with its posted balance as of a date. Balances are debit-positive and cover the account's own postings only; a parent's balance excludes its sub-accounts (those with parent_id set to it), which share its type, subtype, and tax line. Use this for the chart of accounts and current balances; for a full P&L or balance sheet, or history over a range, use run_report instead. Read the business profile (get_org_profile or org://profile) first to learn which accounts this business uses.",
   money: true,
   input: z.object({
     as_of: IsoDate.optional().describe("Defaults to today"),
@@ -1547,13 +1663,13 @@ export function listTools() {
   }));
 }
 
-export function registerMcpTool<S extends z.ZodType>(t: Tool<S>) {
+export function registerMcpTool<S extends z.ZodObject>(t: Tool<S>) {
   tool(t);
 }
 
 export class ToolInputError extends Error {}
 
-export async function callTool(t: ToolCtx, name: string, args: unknown) {
+export async function callTool(conn: McpConn, name: string, args: unknown) {
   const def = tools.find((x) => x.name === name);
   if (!def) return null;
   const parsed = def.input.safeParse(args ?? {});
@@ -1561,5 +1677,8 @@ export async function callTool(t: ToolCtx, name: string, args: unknown) {
     throw new ToolInputError(
       parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "),
     );
-  return def.run(t, parsed.data);
+  if (def.global) return def.run(conn, parsed.data);
+  // The org comes from the call's org_id (or the default), and must be one the connection covers.
+  const scope = await conn.scope((parsed.data as { org_id?: string }).org_id);
+  return def.run({ ctx: conn.ctx, conn, scope }, parsed.data);
 }

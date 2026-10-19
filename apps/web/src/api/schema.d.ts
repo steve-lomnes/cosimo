@@ -18226,12 +18226,15 @@ export interface paths {
                         scope?: string;
                         resource?: string;
                         approve: boolean;
-                        org_id?: string;
-                        /**
-                         * @default bookkeeper
-                         * @enum {string}
-                         */
-                        role?: "owner" | "bookkeeper" | "accountant" | "viewer";
+                        orgs?: {
+                            org_id: string;
+                            /**
+                             * @default bookkeeper
+                             * @enum {string}
+                             */
+                            role?: "owner" | "bookkeeper" | "accountant" | "viewer";
+                        }[];
+                        default_org_id?: string;
                     };
                 };
             };
@@ -18429,7 +18432,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Disconnect a client (your own, or any connected to an org you own) */
+        /** Disconnect a client: your own connection entirely, or, as an owner, its access to the orgs you own */
         delete: {
             parameters: {
                 query?: never;
@@ -18439,6 +18442,205 @@ export interface paths {
                 };
                 path: {
                     grantId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Ok"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Change which of a connection's orgs its tools use by default (your own connection) */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    grantId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        default_org_id: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Ok"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/v1/oauth/connections/{grantId}/orgs/{orgId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove one org from a connection (your own, or any connected to an org you own); its other orgs keep working */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    grantId: string;
+                    orgId: string;
                 };
                 cookie?: never;
             };
@@ -18530,7 +18732,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** All AI clients connected to this organization (owner) */
+        /** All AI clients connected to this organization, each with only this org's grant (owner) */
         get: {
             parameters: {
                 query?: never;
@@ -21108,9 +21310,13 @@ export interface components {
             client_name: string;
             user_id: string;
             user_email: string;
-            org_id: string;
-            org_name: string;
-            role: string;
+            default_org_id: string | null;
+            orgs: {
+                org_id: string;
+                org_name: string;
+                role: string;
+                granted_at: string;
+            }[];
             created_at: string;
             last_used_at: string | null;
         };

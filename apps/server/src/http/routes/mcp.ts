@@ -5,32 +5,36 @@
  * Authentication is a bearer token only (OAuth access token or API token); cookies are ignored so
  * a browser session can't be used cross-site. Unauthenticated requests get 401 with
  * `WWW-Authenticate` pointing at the protected resource metadata, which starts the OAuth flow.
- * Every call acts as the `mcp` actor in the token's single organization.
+ * Every call acts as the `mcp` actor in one of the token's organizations: the one the call names
+ * (`org_id` on a tool, `org://{org_id}/…` for a resource) or the connection's default, and only
+ * if the token covers it.
  */
-import { system } from "@cosimo/db";
 import { minRole, VERSION } from "@cosimo/shared";
 import type { OpenAPIHono } from "@hono/zod-openapi";
-import { inArray } from "drizzle-orm";
 import type { Context } from "hono";
 import type { AppContext } from "../../context.ts";
 import { TOKEN_PREFIX } from "../../crypto.ts";
-import { callTool, listTools, type ToolCtx, ToolInputError } from "../../services/mcp-tools.ts";
 import {
-  accountNamesByCode,
-  getProfile,
-  listNotes,
-  notesMarkdown,
-  profileMarkdown,
-} from "../../services/notes.ts";
-import type { OAuthService } from "../../services/oauth.ts";
-import { ApiError } from "../errors.ts";
-import { clientIp } from "../middleware.ts";
+  type ConnOrg,
+  callTool,
+  describeOrgs,
+  listTools,
+  type McpConn,
+  orgNotesMarkdown,
+  orgProfileMarkdown,
+  type ToolCtx,
+  ToolInputError,
+} from "../../services/mcp-tools.ts";
+import { effectiveDefault, type OAuthService } from "../../services/oauth.ts";
+import { ApiError, forbidden } from "../errors.ts";
+import { clientIp, tokenGrants } from "../middleware.ts";
 import type { AppEnv, OrgScope, Principal } from "../types.ts";
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS = `Cosimo is double-entry bookkeeping for one organization.
-- Start by reading the resources org://profile (what the business does, which accounts to use) and org://notes (what has been learned before).
+const INSTRUCTIONS = `Cosimo is double-entry bookkeeping. A connection covers one or more organizations, with a role in each; one of them is the default.
+- Call list_orgs to see the organizations, your role in each, and which is the default. Every other tool takes an optional org_id; omit it to work in the default organization. Only the person can change the default or which organizations you can reach.
+- Before working in an organization, read its business profile (what the business does, which accounts to use) and its notes (what has been learned before): get_org_profile and get_org_notes, or the resources org://profile and org://notes (default organization) and org://{org_id}/profile and org://{org_id}/notes.
 - Money is integer cents in the org's currency (123456 = $1,234.56); divide by 100 before showing an amount to a person. Journal lines are debit-positive; bank amounts are positive for money in.
 - Every write tool needs a short rationale. Writes are proposals: they wait in the review queue until a person approves them. Tell the person what is waiting (list_pending_reviews).
 - You cannot approve, reject, void, delete, or change lock dates. Reversals, replacements, and payment date changes are proposals.
@@ -95,27 +99,51 @@ async function principalFor(ctx: AppContext, token: string): Promise<Principal |
   return null;
 }
 
-async function scopeFor(ctx: AppContext, p: Principal, ip: string): Promise<OrgScope | null> {
-  if (!p.orgId) return null;
-  const member = await ctx.orgs.membership(p.userId, p.orgId);
-  const handle = member ? await ctx.orgs.open(p.orgId) : null;
-  if (!member || !handle) return null;
-  const role = p.roleCap ? minRole(p.roleCap, member) : member;
-  return {
-    id: p.orgId,
-    handle,
-    role,
-    actor: {
-      actor: "mcp",
-      role,
-      userId: p.userId,
-      apiTokenId: p.apiTokenId ?? null,
-      oauthClientId: p.oauthClientId ?? null,
-      ip,
-      proposeOnly: p.kind === "oauth" ? true : (p.proposeOnly ?? false),
-      displayName: p.name || p.email,
+/**
+ * The orgs this token covers, keeping only those where the user is still a member, each capped at
+ * the lower of the grant's role and the membership role. Null when none is left.
+ */
+async function connectionFor(ctx: AppContext, p: Principal, ip: string): Promise<McpConn | null> {
+  const orgs: ConnOrg[] = [];
+  for (const g of tokenGrants(p) ?? []) {
+    const member = await ctx.orgs.membership(p.userId, g.orgId);
+    if (member) orgs.push({ id: g.orgId, role: minRole(g.roleCap, member) });
+  }
+  if (!orgs.length) return null;
+  const ids = orgs.map((o) => o.id);
+  const proposeOnly = p.kind === "oauth" ? true : (p.proposeOnly ?? false);
+  const conn: McpConn = {
+    ctx,
+    orgs,
+    defaultOrgId: effectiveDefault(p.kind === "oauth" ? (p.defaultOrgId ?? null) : (p.orgId ?? null), ids),
+    proposeOnly,
+    async scope(orgId) {
+      const id = orgId ?? conn.defaultOrgId;
+      const o = id ? orgs.find((x) => x.id === id) : undefined;
+      if (!o)
+        throw forbidden(
+          `${id ? `This connection is not authorized for organization ${id}.` : "This connection has no default organization, so pass org_id."} ${await describeOrgs(conn)}`,
+        );
+      const handle = await ctx.orgs.open(o.id);
+      if (!handle) throw forbidden(`Organization ${o.id} is not available. ${await describeOrgs(conn)}`);
+      return {
+        id: o.id,
+        handle,
+        role: o.role,
+        actor: {
+          actor: "mcp",
+          role: o.role,
+          userId: p.userId,
+          apiTokenId: p.apiTokenId ?? null,
+          oauthClientId: p.oauthClientId ?? null,
+          ip,
+          proposeOnly,
+          displayName: p.name || p.email,
+        },
+      };
     },
   };
+  return conn;
 }
 
 function toolResult(value: unknown) {
@@ -130,7 +158,13 @@ function toolError(message: string) {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
-async function handle(t: ToolCtx, msg: JsonRpc) {
+/** `org://profile` reads the default org; `org://{org_id}/profile` reads a named one. */
+function parseResourceUri(uri: string) {
+  const m = /^org:\/\/([^/]+)\/([^/]+)$/.exec(uri);
+  return m ? { orgId: m[1], uri: `org://${m[2]}` } : { orgId: undefined, uri };
+}
+
+async function handle(conn: McpConn, msg: JsonRpc) {
   const id = msg.id;
   const params = msg.params ?? {};
   switch (msg.method) {
@@ -157,7 +191,7 @@ async function handle(t: ToolCtx, msg: JsonRpc) {
     case "tools/call": {
       const name = String(params.name ?? "");
       try {
-        const out = await callTool(t, name, params.arguments);
+        const out = await callTool(conn, name, params.arguments);
         if (out === null) return rpcError(id, -32602, `Unknown tool: ${name}`);
         return { jsonrpc: "2.0", id, result: toolResult(out) };
       } catch (e) {
@@ -177,15 +211,32 @@ async function handle(t: ToolCtx, msg: JsonRpc) {
         },
       };
     case "resources/templates/list":
-      return { jsonrpc: "2.0", id, result: { resourceTemplates: [] } };
-    case "resources/read": {
-      const r = resources.find((x) => x.uri === params.uri);
-      if (!r) return rpcError(id, -32002, `Resource not found: ${String(params.uri)}`);
       return {
         jsonrpc: "2.0",
         id,
-        result: { contents: [{ uri: r.uri, mimeType: r.mimeType, text: await r.read(t) }] },
+        result: {
+          resourceTemplates: resources.map(({ read: _r, uri, name, title, ...r }) => ({
+            ...r,
+            uriTemplate: uri.replace("org://", "org://{org_id}/"),
+            name: `${name}-by-org`,
+            title: title ? `${title} (any organization)` : undefined,
+          })),
+        },
       };
+    case "resources/read": {
+      const asked = String(params.uri ?? "");
+      const target = parseResourceUri(asked);
+      const r = resources.find((x) => x.uri === target.uri);
+      if (!r) return rpcError(id, -32002, `Resource not found: ${asked}`);
+      let scope: OrgScope;
+      try {
+        scope = await conn.scope(target.orgId);
+      } catch (e) {
+        if (e instanceof ApiError) return rpcError(id, -32002, e.message);
+        throw e;
+      }
+      const text = await r.read({ ctx: conn.ctx, conn, scope });
+      return { jsonrpc: "2.0", id, result: { contents: [{ uri: asked, mimeType: r.mimeType, text }] } };
     }
     case "prompts/list":
       return { jsonrpc: "2.0", id, result: { prompts: [] } };
@@ -196,28 +247,14 @@ async function handle(t: ToolCtx, msg: JsonRpc) {
   }
 }
 
-async function userNames(ctx: AppContext, ids: string[]) {
-  const rows = await ctx.system.db
-    .select({ id: system.users.id, email: system.users.email, name: system.users.name })
-    .from(system.users)
-    .where(inArray(system.users.id, ids))
-    .all();
-  return new Map(rows.map((u) => [u.id, u.name || u.email]));
-}
-
 registerMcpResource({
   uri: "org://profile",
   name: "profile",
   title: "Business profile",
   description:
-    "What the business does, how it bills, typical customers and vendors, and which accounts to use for recurring items. Read this first.",
+    "What the business does, how it bills, typical customers and vendors, and which accounts to use for recurring items. Read this first. org://profile is the default organization; org://{org_id}/profile reads another one this connection covers.",
   mimeType: "text/markdown",
-  async read(t) {
-    const db = t.scope.handle.db;
-    const p = await getProfile(db);
-    const reg = await t.ctx.orgs.get(t.scope.id);
-    return `# ${reg?.name ?? "Business"}\n\n${profileMarkdown(p.profile, await accountNamesByCode(db))}`;
-  },
+  read: orgProfileMarkdown,
 });
 
 registerMcpResource({
@@ -225,11 +262,9 @@ registerMcpResource({
   name: "notes",
   title: "Bookkeeping notes",
   description:
-    "Dated, attributed notes on how this business books things, newest first. Add to them with append_note.",
+    "Dated, attributed notes on how this business books things, newest first. Add to them with append_note. org://notes is the default organization; org://{org_id}/notes reads another one this connection covers.",
   mimeType: "text/markdown",
-  async read(t) {
-    return notesMarkdown(await listNotes(t.scope.handle.db, (ids) => userNames(t.ctx, ids)));
-  },
+  read: orgNotesMarkdown,
 });
 
 export function mountMcp(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
@@ -265,13 +300,13 @@ export function mountMcp(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
     const ip = clientIp(c);
     const p = await principalFor(ctx, auth.slice(7).trim());
     if (!p) return challenge(c, ctx, "invalid_token", "The access token is invalid, expired, or revoked.");
-    const scope = await scopeFor(ctx, p, ip);
-    if (!scope)
+    const conn = await connectionFor(ctx, p, ip);
+    if (!conn)
       return challenge(
         c,
         ctx,
         "invalid_token",
-        "The token's organization is no longer available to this user.",
+        "The token's organizations are no longer available to this user.",
       );
 
     let body: unknown;
@@ -280,7 +315,6 @@ export function mountMcp(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
     } catch {
       return c.json(rpcError(null, -32700, "Parse error"), 400);
     }
-    const t: ToolCtx = { ctx, scope };
     const batch = Array.isArray(body);
     const msgs = (batch ? body : [body]) as JsonRpc[];
     const out = [];
@@ -291,7 +325,7 @@ export function mountMcp(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
       }
       if (m.id === undefined || m.id === null) continue; // notification or response: nothing to answer
       try {
-        out.push(await handle(t, m));
+        out.push(await handle(conn, m));
       } catch (e) {
         ctx.logger.error("mcp error", { err: e, method: m.method, request_id: c.get("requestId") });
         out.push(rpcError(m.id, -32603, "Internal error"));

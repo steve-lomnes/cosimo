@@ -4,7 +4,7 @@ import { getCookie } from "hono/cookie";
 import { hashToken, safeEqual, TOKEN_PREFIX } from "../crypto.ts";
 import type { ActorInfo } from "../services/actor.ts";
 import { ApiError, forbidden, notFound, tooMany, unauthorized } from "./errors.ts";
-import type { AppEnv, OrgScope, Principal } from "./types.ts";
+import type { AppEnv, OrgGrant, OrgScope, Principal } from "./types.ts";
 
 export const SESSION_COOKIE = "cosimo_session";
 export const CSRF_COOKIE = "cosimo_csrf";
@@ -131,18 +131,30 @@ export function rateLimit(c: C, bucket: string, limit: number, windowMs: number,
   }
 }
 
+/**
+ * The orgs a bearer token may reach, each with its role cap, or null for a browser session (no limit
+ * beyond membership). An API token covers its one org; an OAuth connection covers its granted orgs.
+ */
+export function tokenGrants(p: Principal): OrgGrant[] | null {
+  if (p.orgGrants) return p.orgGrants;
+  if (p.orgId) return [{ orgId: p.orgId, roleCap: p.roleCap ?? "viewer" }];
+  return null;
+}
+
 /** Resolve org membership and effective role for /api/v1/orgs/:orgId/* routes. */
 export const orgScope: MiddlewareHandler<AppEnv> = async (c, next) => {
   const ctx = c.get("ctx");
   const p = requireAuth(c);
   const orgId = c.req.param("orgId");
   if (!orgId) throw notFound("Organization");
-  if (p.orgId && p.orgId !== orgId) throw forbidden("This token is not valid for that organization.");
+  const grants = tokenGrants(p);
+  const grant = grants?.find((g) => g.orgId === orgId);
+  if (grants && !grant) throw forbidden("This token is not valid for that organization.");
   const membershipRole = await ctx.orgs.membership(p.userId, orgId);
   if (!membershipRole) throw notFound("Organization");
   const handle = await ctx.orgs.open(orgId);
   if (!handle) throw notFound("Organization");
-  const role: Role = p.roleCap ? minRole(p.roleCap, membershipRole) : membershipRole;
+  const role: Role = grant ? minRole(grant.roleCap, membershipRole) : membershipRole;
   const actor: ActorInfo = {
     actor: p.kind === "session" ? "user" : p.kind === "oauth" ? "mcp" : "api_token",
     role,

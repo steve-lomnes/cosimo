@@ -16,6 +16,7 @@ import { unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
 import { instanceAudit } from "./instance-audit.ts";
+import { forgetOrgTx } from "./oauth.ts";
 import type { OrgProvisioner } from "./provisioning.ts";
 import type { SystemHandle } from "./types.ts";
 
@@ -253,8 +254,7 @@ export class OrgService {
       await tx.delete(system.memberships).where(eq(system.memberships.orgId, orgId));
       await tx.delete(system.apiTokens).where(eq(system.apiTokens.orgId, orgId));
       await tx.delete(system.invitations).where(eq(system.invitations.orgId, orgId));
-      await tx.delete(system.oauthCodes).where(eq(system.oauthCodes.orgId, orgId));
-      await tx.delete(system.oauthTokens).where(eq(system.oauthTokens.orgId, orgId));
+      await forgetOrgTx(tx, orgId);
       await tx.delete(system.organizations).where(eq(system.organizations.id, orgId));
     });
     await this.provisioner.destroy(orgId, row.dbUrl);

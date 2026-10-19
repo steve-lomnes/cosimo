@@ -142,7 +142,8 @@ backups use an S3-compatible bucket, see [docs/object-storage.md](docs/object-st
 Cosimo serves a Model Context Protocol endpoint at `<url>/mcp` (streamable HTTP).
 
 - **Preferred: OAuth with only the server URL.** Add `<url>/mcp` as a connector in your client. The
-  human signs in, picks an organization, and approves. The default grant is Bookkeeper, with every
+  human signs in, checks the organizations you may use (with a role in each), picks the default
+  one, and approves. Tools take an optional `org_id`; without it they use the default. The default grant is Bookkeeper, with every
   write routed through the review queue.
 - **Alternative: an API token**, for scripts or clients without OAuth. The human creates it in
   Account → Personal API tokens or with `cosimo token create --user <email> --org <org_id> --name <name> --role bookkeeper --propose-only`,

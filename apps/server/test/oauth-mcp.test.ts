@@ -569,6 +569,13 @@ describe("MCP", () => {
       "list_recurring_templates",
       "propose_recurring_template",
       "sync_bank_feed",
+      "list_receipts",
+      "get_receipt",
+      "create_receipt",
+      "update_receipt",
+      "match_receipt",
+      "unmatch_receipt",
+      "dismiss_receipt",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])

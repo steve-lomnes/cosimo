@@ -22,6 +22,7 @@ export const ATTACHMENT_TARGETS = [
   "bank_transaction",
   "contact",
   "org_settings",
+  "receipt",
 ] as const;
 export type AttachmentTarget = (typeof ATTACHMENT_TARGETS)[number];
 

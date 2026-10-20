@@ -22,6 +22,7 @@ import {
   type McpConn,
   orgNotesMarkdown,
   orgProfileMarkdown,
+  splitContent,
   type ToolCtx,
   ToolInputError,
 } from "../../services/mcp-tools.ts";
@@ -146,9 +147,11 @@ async function connectionFor(ctx: AppContext, p: Principal, ip: string): Promise
   return conn;
 }
 
-function toolResult(value: unknown) {
+function toolResult(out: unknown) {
+  // A tool can send content beyond its JSON result (a receipt's image), after the text item.
+  const { value, extra } = splitContent(out);
   return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(value, null, 2) }, ...extra],
     ...(value && typeof value === "object" && !Array.isArray(value) ? { structuredContent: value } : {}),
     isError: false,
   };

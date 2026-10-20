@@ -17,7 +17,7 @@ import {
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { unprocessable } from "../http/errors.ts";
-import type { ActorInfo } from "./actor.ts";
+import { type ActorInfo, systemActor } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
 import { applyRulesTx, mustGetBankAccount, pairImportedTransfersTx } from "./banking.ts";
 
@@ -249,7 +249,7 @@ export async function commitImportTx(
     });
   }
   const paired = await pairImportedTransfersTx(tx, orgId, ids);
-  const rules = await applyRulesTx(tx, orgId, ids);
+  const rules = await applyRulesTx(tx, orgId, ids, systemActor(a.userId));
   return {
     batch_id: batchId,
     format: p.format,

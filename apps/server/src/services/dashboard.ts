@@ -1,7 +1,7 @@
 /**
  * Dashboard (SPEC §9.2): cash position, month and year-to-date income and expense, work waiting
- * (review queue, Categorize), overdue invoices, bills coming due, and bank connections that need
- * attention. All amounts are integer cents.
+ * (review queue, Categorize, receipts left in the inbox), overdue invoices, bills coming due, and
+ * bank connections that need attention. All amounts are integer cents.
  */
 import { org } from "@cosimo/db";
 import { addDays, diffDays, fiscalYearStart, today } from "@cosimo/shared";
@@ -9,6 +9,7 @@ import { and, asc, count, eq, inArray, isNull, ne } from "drizzle-orm";
 import { type SyncStatusView, syncStatusView } from "./bank-sync.ts";
 import { listBankAccounts } from "./banking.ts";
 import { accountMap, settingsRow } from "./ledger.ts";
+import { staleReceiptCount } from "./receipts.ts";
 import { runReport } from "./reports.ts";
 import type { OrgHandle } from "./types.ts";
 
@@ -48,6 +49,8 @@ export interface DashboardData {
   review_pending: number;
   bank_needs_review: number;
   bank_pending: { count: number; total: number };
+  /** Receipts in the inbox for more than 30 days with no bank transaction matched. */
+  stale_receipts: { count: number };
   overdue_invoices: {
     count: number;
     total: number;
@@ -195,6 +198,7 @@ export async function dashboard(db: Reader, orgId: string, asOf = today()): Prom
     review_pending: Number(pending?.n ?? 0),
     bank_needs_review: bankNeedsReview,
     bank_pending: bankPending,
+    stale_receipts: { count: await staleReceiptCount(db, asOf) },
     overdue_invoices: {
       count: overdue.length,
       total: overdue.reduce((t, i) => t + i.balance_due, 0),

@@ -48,6 +48,7 @@ Read:
 | `list_invoices`, `list_bills`, `list_bill_payments`, `list_invoice_payments` | Invoices to customers (with the online pay link and whether a bank payment is processing), bills from vendors, payments sent to vendors, and payments received from customers (including any waiting in review and unapplied customer credit) |
 | `list_pending_reviews`, `get_review_item` | The review queue |
 | `list_recurring_templates` | Recurring invoices, bills, and journal entries: schedule, next and upcoming dates, run mode, total, last error, and any change waiting for review |
+| `list_receipts`, `get_receipt` | The receipt inbox (by default receipts with no bank transaction matched yet). `get_receipt` adds the bank transactions that could be the receipt, `attach_url` (the receipt's page in Cosimo), and the receipt's image after the JSON: a JPEG of at most 1568 px on the long edge, or a PDF as an embedded resource |
 
 `list_uncategorized_transactions` leaves out transactions still pending at the bank: they aren't
 categorizable yet and don't count toward a closed month.
@@ -91,6 +92,8 @@ Apply directly, without review, and recorded in the audit log:
 |---|---|
 | `create_contact`, `update_contact` | Adds, edits, archives, or unarchives a customer or vendor (contacts don't touch the books) |
 | `append_note` | Adds a dated note attributed to the assistant (notes don't touch the books) |
+| `create_receipt`, `update_receipt` | Captures a receipt from its fields (and optionally a file as base64, up to 10 MB), or fills in or corrects one. `amount` is what the card is charged, tip included. The result includes `attach_url`, where the person adds the photo. Receipts don't touch the books; categorizing the matched transaction still goes through review |
+| `match_receipt`, `unmatch_receipt`, `dismiss_receipt` | Matches a receipt to its bank transaction, undoes a match or turns down a suggestion ("not this receipt", remembered), or takes a receipt out of the inbox |
 | `sync_bank_feed` | Fetches new transactions from Plaid now, for one bank account, one connection, or all of them. Rules run as in a scheduled sync, under the same review policies. It returns the new rows, with any rule suggestion. A connection synced within the last minute answers `cooldown` without calling Plaid (Admin → Settings → Plaid sets the interval). `force_refresh` also calls Plaid's `/transactions/refresh`, which Plaid bills separately, only when an instance admin allows it. A connection that needs reconnecting is reported as `needs_reauth`: only a person can fix that. Needs Owner or Bookkeeper |
 
 There are no tools to approve, reject, void, delete, or change lock dates. OAuth access

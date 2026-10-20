@@ -13,6 +13,7 @@ import { mountOAuth, oauthRoutes } from "./http/routes/oauth.ts";
 import { mountPay, onlinePaymentRoutes } from "./http/routes/online-payments.ts";
 import { operationsRoutes } from "./http/routes/operations.ts";
 import { plaidRoutes } from "./http/routes/plaid.ts";
+import { receiptRoutes } from "./http/routes/receipts.ts";
 import { recurringRoutes } from "./http/routes/recurring.ts";
 import { registerBankingJobs } from "./jobs/banking-jobs.ts";
 import { registerDocumentJobs } from "./jobs/document-jobs.ts";
@@ -47,6 +48,8 @@ registerContextPlugin(() => {
   registerBankingJobs();
 });
 registerApiModule(bankingRoutes);
+// Receipt inbox (#89)
+registerApiModule(receiptRoutes);
 
 // Phase 4: receivables and payables
 registerContextPlugin(() => {

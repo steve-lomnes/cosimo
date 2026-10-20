@@ -87,6 +87,7 @@ The tables most readers want:
 | `provider_payments`, `provider_events`, `provider_customers` | Online payments: each Stripe payment recorded (with its fee entry), webhook events received, and each contact's Stripe customer (with the cash balance Stripe last reported for it) |
 | `provider_adjustments`, `provider_payouts` | Stripe refunds and dispute movements against recorded payments (with the entry proposed for each), and Stripe payouts (with the bank transaction and transfer entry they were matched to) |
 | `bank_accounts`, `bank_transactions` | Bank and card accounts and their imported or synced transactions |
+| `receipts` | The receipt inbox: each receipt's fields, `status` (inbox, matched, booked, dismissed), its file (`attachment_id`), and the bank transaction it is matched to (`matched_bank_txn_id`) or suggested for |
 | `reconciliations`, `reconciliation_items` | Completed and in-progress reconciliations |
 | `rules`, `review_items`, `review_policy` | Categorization rules and the review queue |
 | `attachments`, `attachment_links` | Attachment metadata; the bytes are in `attachments/<storage_key>` |

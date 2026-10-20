@@ -12,6 +12,9 @@
  * replace, and a payment's date) are proposals like any other write, and so is recording a customer
  * payment against invoices. Notes, contacts, and bank feed syncs don't touch the books, so they apply
  * directly and are recorded in the audit log (rules a sync runs still go through the review policy).
+ * Receipts (the receipt inbox) don't touch the books either: creating, filling in, matching, and
+ * dismissing one apply directly and are audited, while categorizing the matched transaction still
+ * goes through review. get_receipt sends the receipt's image after its JSON (`withContent`).
  * Recurring templates are proposed too, and nothing runs until a person approves. An assistant may
  * withdraw its own pending proposals, which ends them as rejected. There is no tool to approve,
  * reject, void, delete, or move lock dates.
@@ -25,6 +28,7 @@ import type { AppContext } from "../context.ts";
 import { forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { OrgScope } from "../http/types.ts";
 import { listAccounts } from "./accounts.ts";
+import { mustGetAttachment, storeBlob } from "./attachments.ts";
 import {
   categorizeTx,
   countBankTxns,
@@ -50,6 +54,7 @@ import {
   recordPaymentTx,
 } from "./documents.ts";
 import { assertNoPendingReplacement, proposeReplacementTx } from "./entry-replacement-review.ts";
+import { assistantImage, normalizeUpload } from "./images.ts";
 import { holdInvoiceDraftTx } from "./invoice-review.ts";
 import { getEntry, listEntries, reverseEntryTx, submitEntryTx } from "./ledger.ts";
 import {
@@ -64,6 +69,20 @@ import { payLinker } from "./online-payments.ts";
 import { proposePaymentRedateTx } from "./payment-redate-review.ts";
 import { syncForAssistant } from "./plaid.ts";
 import {
+  createReceiptTx,
+  dismissReceiptTx,
+  listReceipts,
+  matchReceiptTx,
+  mustGetReceipt,
+  type ReceiptInput,
+  type ReceiptView,
+  receiptAttachUrl,
+  receiptCandidates,
+  receiptView,
+  unmatchReceiptTx,
+  updateReceiptTx,
+} from "./receipts.ts";
+import {
   inputOf,
   listTemplates,
   mustGetTemplate,
@@ -76,6 +95,7 @@ import {
 import { REPORT_KEYS, runReport } from "./reports.ts";
 import { listReview, mustGetReview, reviewView, withdrawReviewTx } from "./review.ts";
 import { createRuleTx } from "./rules.ts";
+import type { BlobStore } from "./storage.ts";
 
 /** One org a connection can use, with the user's membership still in place. */
 export interface ConnOrg {
@@ -123,6 +143,32 @@ interface ConnTool<S extends z.ZodObject> extends ToolBase<S> {
   run(c: McpConn, input: z.output<S>): Promise<unknown>;
 }
 type Tool<S extends z.ZodObject> = OrgTool<S> | ConnTool<S>;
+
+/** An MCP content item sent after a tool's JSON result: an image, or an embedded file. */
+export type McpContent =
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } };
+
+const CONTENT = Symbol("mcp.extraContent");
+interface WithContent {
+  [CONTENT]: true;
+  value: unknown;
+  extra: McpContent[];
+}
+
+/** Return `value` as the tool's result, with `extra` content items after its JSON (get_receipt's image). */
+export function withContent(value: unknown, extra: McpContent[]): WithContent {
+  return { [CONTENT]: true, value, extra };
+}
+
+/** Split a tool's return value into its JSON result and any extra content items. */
+export function splitContent(out: unknown): { value: unknown; extra: McpContent[] } {
+  if (out && typeof out === "object" && CONTENT in out) {
+    const w = out as WithContent;
+    return { value: w.value, extra: w.extra };
+  }
+  return { value: out, extra: [] };
+}
 
 const tools: Tool<z.ZodObject>[] = [];
 /** Appended to the description of every tool with `money: true`. */
@@ -1362,6 +1408,266 @@ tool({
     return {
       contact: contactView(c),
       message: "Updated. Contacts apply directly; this did not go to the review queue.",
+    };
+  },
+});
+
+// ----------------------------------------------------------------------------- receipts
+
+/** The two ways to get a receipt into Cosimo from a chat with an assistant (SKILL.md). */
+const RECEIPT_FLOWS =
+  "Two flows: (a) the person snaps the receipt in Cosimo, then you call list_receipts and get_receipt (which shows you the image) and fill in the fields with update_receipt; (b) the person shares a photo with you in chat, you read it and call create_receipt with the fields, then give the person the `attach_url` from the result so they can add the same photo in Cosimo (you can't forward a chat photo's bytes to this tool).";
+const RECEIPTS_DIRECT =
+  "Receipts apply immediately and are recorded in the audit log; they are not proposals and don't go to the review queue. Categorizing the matched transaction still goes through review.";
+
+const ReceiptFields = {
+  merchant: z.string().max(200).nullable().optional(),
+  date: IsoDate.nullable().optional().describe("Receipt date, YYYY-MM-DD. Defaults to today."),
+  time: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/, "HH:MM")
+    .nullable()
+    .optional()
+    .describe("Time on the receipt, HH:MM"),
+  amount: cents(
+    "What the card is charged, tip included: the receipt's grand total plus any tip written in.",
+    "positive",
+  )
+    .nullable()
+    .optional(),
+  pre_tip_amount: cents(
+    "The total before the tip (subtotal plus tax), when a tip may be added; lets a charge with a different tip still match.",
+    "nonnegative",
+  )
+    .nullable()
+    .optional(),
+  tax_amount: cents(undefined, "nonnegative").nullable().optional(),
+  tip_amount: cents(undefined, "nonnegative").nullable().optional(),
+  bank_account_id: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Paid with: the bank or card account (from list_uncategorized_transactions' bank_accounts)."),
+  account: z.string().nullable().optional().describe("Expense account to categorize it to, ID or code"),
+  contact_id: z.string().nullable().optional().describe("The vendor, from list_contacts"),
+  memo: z.string().max(1000).nullable().optional(),
+  business_purpose: z.string().max(1000).nullable().optional().describe("Why it was a business expense"),
+  attendees: z.string().max(1000).nullable().optional().describe("Who else was there, for meals"),
+  location: z.string().max(200).nullable().optional().describe("City and state, or address"),
+};
+
+type ReceiptToolFields = {
+  [K in keyof typeof ReceiptFields]?: z.output<(typeof ReceiptFields)[K]>;
+};
+
+async function receiptInput(t: ToolCtx, i: ReceiptToolFields): Promise<ReceiptInput> {
+  const out: ReceiptInput = { extraction_source: "assistant" };
+  const map: [keyof ReceiptToolFields, keyof ReceiptInput][] = [
+    ["merchant", "merchant"],
+    ["date", "receipt_date"],
+    ["time", "receipt_time"],
+    ["amount", "amount"],
+    ["pre_tip_amount", "pre_tip_amount"],
+    ["tax_amount", "tax_amount"],
+    ["tip_amount", "tip_amount"],
+    ["bank_account_id", "bank_account_id"],
+    ["contact_id", "contact_id"],
+    ["memo", "memo"],
+    ["business_purpose", "business_purpose"],
+    ["attendees", "attendees"],
+    ["location", "location"],
+  ];
+  for (const [from, to] of map) if (i[from] !== undefined) (out as Record<string, unknown>)[to] = i[from];
+  if (i.account !== undefined) out.account_id = i.account === null ? null : await accountId(t, i.account);
+  return out;
+}
+
+function receiptOut(t: ToolCtx, r: ReceiptView) {
+  return { receipt: r, attach_url: receiptAttachUrl(t.ctx.config.server.public_url, t.scope.id, r.id) };
+}
+
+/** The largest file `create_receipt` accepts as base64, decoded. */
+export const MCP_RECEIPT_MAX_BYTES = 10 * 1024 * 1024;
+
+tool({
+  name: "list_receipts",
+  title: "Receipts in the inbox",
+  description: `Receipts captured in Cosimo, newest first; by default those still in the inbox (no bank transaction matched yet). Each has its fields, its file (if any), and the matched or suggested transaction. A receipt with \`extraction_source: manual\` and missing fields may need you to read its image (get_receipt) and fill them in (update_receipt). ${RECEIPT_FLOWS} Pass next_cursor back as cursor for more.`,
+  money: true,
+  input: z.object({
+    status: z
+      .array(z.enum(["inbox", "matched", "booked", "dismissed"]))
+      .default(["inbox"])
+      .describe("Which receipts; default the inbox"),
+    limit: z.number().int().min(1).max(200).default(50),
+    cursor: z.string().optional(),
+  }),
+  async run(t, i) {
+    return listReceipts(t.scope.handle.db, t.scope.id, {
+      status: i.status,
+      limit: i.limit,
+      cursor: i.cursor,
+    });
+  },
+});
+
+tool({
+  name: "get_receipt",
+  title: "Read a receipt and its image",
+  description: `One receipt with its fields, the bank transactions that could be it (\`candidates\`, best first), and \`attach_url\` (the receipt's page in Cosimo, where the person can add or replace the photo). The receipt's image follows the JSON as image content (a JPEG, up to 1568 px on the long edge); a PDF follows as an embedded resource. Read it to fill in the fields with update_receipt. ${RECEIPT_FLOWS}`,
+  money: true,
+  input: z.object({ receipt_id: z.string() }),
+  async run(t, i) {
+    const db = t.scope.handle.db;
+    const r = await mustGetReceipt(db, i.receipt_id);
+    const view = await receiptView(db, t.scope.id, r);
+    const out: Record<string, unknown> = {
+      ...receiptOut(t, view),
+      candidates: await receiptCandidates(db, r.id),
+    };
+    const extra: McpContent[] = [];
+    const att = r.attachmentId ? await mustGetAttachment(db, r.attachmentId) : null;
+    if (att) {
+      const bytes = await (t.ctx.services.storage as BlobStore).get(att.storageKey);
+      if (!bytes) out.image_note = "The receipt's file is missing from storage.";
+      else if (att.mimeType === "application/pdf") {
+        extra.push({
+          type: "resource",
+          resource: {
+            uri: `${t.ctx.config.server.public_url.replace(/\/$/, "")}${view.attachment!.download_url}`,
+            mimeType: "application/pdf",
+            blob: Buffer.from(bytes).toString("base64"),
+          },
+        });
+      } else {
+        const img = await assistantImage(bytes, att.mimeType);
+        if (img)
+          extra.push({
+            type: "image",
+            data: Buffer.from(img.data).toString("base64"),
+            mimeType: img.mimeType,
+          });
+        else
+          out.image_note =
+            "This file can't be shown to you (an unsupported or very large image). Ask the person for the receipt's details, or to replace the file with a JPEG at attach_url.";
+      }
+    } else out.image_note = "No file is attached to this receipt yet; the person can add one at attach_url.";
+    return withContent(out, extra);
+  },
+});
+
+tool({
+  name: "create_receipt",
+  title: "Capture a receipt",
+  description: `Capture a receipt from its details, for example after reading a photo the person shared in chat. Give at least the amount (or file_base64). \`amount\` is what the card is charged, tip included; give pre_tip_amount too when a tip may be added later. Cosimo matches the receipt to its bank transaction when the feed brings it (or now, if it is already here) and suggests its account and memo on Categorize. The result includes \`attach_url\`: give it to the person so they can add the photo in Cosimo. file_base64 is for a file you actually hold as bytes (up to 10 MB; JPEG, PNG, WebP, GIF, PDF, or HEIC, which is converted to JPEG). ${RECEIPTS_DIRECT}`,
+  write: true,
+  money: true,
+  input: z.object({
+    ...ReceiptFields,
+    file_base64: z.string().optional().describe("The receipt file, base64-encoded (max 10 MB decoded)"),
+    filename: z.string().max(255).optional().describe("Name of the file in file_base64"),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const { file_base64, filename, ...fields } = i;
+    const input = await receiptInput(t, fields);
+    let blob: Awaited<ReturnType<typeof storeBlob>> | null = null;
+    if (file_base64) {
+      const b64 = file_base64.replace(/^data:[^,]*,/, "").replace(/\s+/g, "");
+      if (Math.floor((b64.length * 3) / 4) > MCP_RECEIPT_MAX_BYTES + 2)
+        throw unprocessable("The file is larger than 10 MB.", "too_large");
+      const bytes = new Uint8Array(Buffer.from(b64, "base64"));
+      if (bytes.byteLength > MCP_RECEIPT_MAX_BYTES)
+        throw unprocessable("The file is larger than 10 MB.", "too_large");
+      blob = await storeBlob(
+        t.ctx.services.storage as BlobStore,
+        t.scope.id,
+        await normalizeUpload({ filename: filename ?? "receipt", type: "", bytes }),
+      );
+    }
+    const r = await t.scope.handle.write((tx) => createReceiptTx(tx, t.scope.id, t.scope.actor, input, blob));
+    const view = await receiptView(t.scope.handle.db, t.scope.id, r);
+    return {
+      ...receiptOut(t, view),
+      message: `Created. ${view.status === "matched" ? "It was matched to its bank transaction. " : ""}Receipts apply directly; this did not go to the review queue.${view.attachment ? "" : " Give the person attach_url to add the photo."}`,
+    };
+  },
+});
+
+tool({
+  name: "update_receipt",
+  title: "Fill in or correct a receipt",
+  description: `Change a receipt's fields, for example after reading its image with get_receipt. Only the fields you pass change; null clears one. \`amount\` is what the card is charged, tip included. Changing the amount, pre-tip amount, date, merchant, or bank account of a receipt in the inbox matches it again. ${RECEIPTS_DIRECT}`,
+  write: true,
+  money: true,
+  input: z.object({ receipt_id: z.string(), ...ReceiptFields }),
+  async run(t, i) {
+    requireWriter(t);
+    const { receipt_id, ...fields } = i;
+    const input = await receiptInput(t, fields);
+    const r = await t.scope.handle.write((tx) =>
+      updateReceiptTx(tx, t.scope.id, t.scope.actor, receipt_id, input),
+    );
+    return {
+      ...receiptOut(t, await receiptView(t.scope.handle.db, t.scope.id, r)),
+      message: "Updated. Receipts apply directly; this did not go to the review queue.",
+    };
+  },
+});
+
+tool({
+  name: "match_receipt",
+  title: "Match a receipt to a bank transaction",
+  description: `Match a receipt to the bank or card transaction it paid for (a candidate from get_receipt, or one from search_transactions). The receipt's file is linked to the transaction, and its account and memo become the transaction's suggestion on Categorize. This does not categorize the transaction; categorize_transaction does, through review. ${RECEIPTS_DIRECT}`,
+  write: true,
+  money: true,
+  input: z.object({ receipt_id: z.string(), transaction_id: z.string() }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write((tx) =>
+      matchReceiptTx(tx, t.scope.id, t.scope.actor, i.receipt_id, i.transaction_id),
+    );
+    return {
+      ...receiptOut(t, await receiptView(t.scope.handle.db, t.scope.id, r)),
+      message: "Matched. Receipts apply directly; categorizing the transaction still goes through review.",
+    };
+  },
+});
+
+tool({
+  name: "unmatch_receipt",
+  title: "Not this receipt",
+  description: `Undo a receipt's match, or turn down the transaction suggested for it. That transaction is remembered as not this receipt and won't be matched or suggested again; the receipt goes back to the inbox and may be matched to another. ${RECEIPTS_DIRECT}`,
+  write: true,
+  money: true,
+  input: z.object({ receipt_id: z.string() }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write((tx) =>
+      unmatchReceiptTx(tx, t.scope.id, t.scope.actor, i.receipt_id),
+    );
+    return {
+      ...receiptOut(t, await receiptView(t.scope.handle.db, t.scope.id, r!)),
+      message: "Unmatched. Receipts apply directly; this did not go to the review queue.",
+    };
+  },
+});
+
+tool({
+  name: "dismiss_receipt",
+  title: "Dismiss a receipt",
+  description: `Take a receipt out of the inbox without booking it, for example a personal purchase or a duplicate. A person can restore it in Cosimo. Only receipts in the inbox can be dismissed (unmatch a matched one first). ${RECEIPTS_DIRECT}`,
+  write: true,
+  money: true,
+  input: z.object({ receipt_id: z.string(), reason: z.string().max(500).optional() }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write((tx) =>
+      dismissReceiptTx(tx, t.scope.id, t.scope.actor, i.receipt_id, i.reason ?? null),
+    );
+    return {
+      ...receiptOut(t, await receiptView(t.scope.handle.db, t.scope.id, r)),
+      message: "Dismissed. Receipts apply directly; this did not go to the review queue.",
     };
   },
 });

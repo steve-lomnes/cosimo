@@ -435,3 +435,30 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   earliest-timestamp date is what a verifier should weigh. A failed service is retried after a
   3-hour back-off, on the next daily run in practice, rather than every scheduler tick, because
   failed attempts are append-only rows.
+- **A receipt inbox, matched to the bank feed when the charge posts** (#89): a card purchase reaches
+  Plaid days after the receipt is photographed, so a receipt is its own record (`receipts`), not an
+  attachment waiting for a target. **The window is a day before the receipt to a week after**, and
+  the amount must be exact, or the pre-tip total plus **up to 35% tip** when the merchant also
+  matches (a tip changes the charge, so a tip-tolerant match needs more evidence). **Auto-match only
+  when the receipt and the transaction are each other's only fit**, the amount is exact, and the
+  merchant matches or the receipt names the transaction's account; anything less is a suggestion,
+  because a wrong match moves a file and a memo onto someone else's transaction. **Receipts are not
+  proposals**: like contacts, they don't touch the books, so they apply at once (audited), for people
+  and assistants alike; categorizing the matched transaction still goes through review.
+  **Suggestions live on the receipt** (`suggested_bank_txn_id`, one transaction per receipt) rather
+  than a link table: one column keeps a receipt from being suggested in two places, and a
+  transaction's suggested receipts are the ones pointing at it (two receipts may, and then neither
+  is matched automatically). **Categorizing a transaction confirms its suggested receipt** (from a
+  person, an assistant, or a rule), since choosing the account the receipt suggested is the
+  confirmation; "Not this receipt" is the way out, and is remembered. **Booking a receipt with no
+  bank transaction is done on the server** (a draft bill, or an entry through the review policy), so
+  the web app and the API create the same records. There is no server-side OCR: an assistant reads
+  the image over MCP (`get_receipt` returns it as image content, downscaled to 1568 px) and fills
+  in the fields.
+- **HEIC photos are converted to JPEG on upload** (#89): iPhones save HEIC, which browsers and
+  assistants can't read. `heic-convert` (libheif compiled to WASM, so the single compiled binary
+  still has no native code) converts any upload sniffed as HEIC, receipts and other attachments
+  alike, at full resolution; a file it can't convert is refused (`heic_unsupported`) rather than
+  stored unreadable. **libheif-js is LGPL-3.0** and used unmodified, which is compatible
+  with distributing Cosimo under MIT. `jpeg-js` (already pulled in by
+  heic-convert) downscales the image `get_receipt` sends an assistant.

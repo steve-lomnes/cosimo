@@ -629,6 +629,73 @@ export const bankTransactions = sqliteTable(
   ],
 );
 
+/**
+ * Receipt inbox (#89): a receipt captured when someone pays, before its bank transaction exists.
+ * Matched to the card charge once the feed brings it (`matched_bank_txn_id`, at most one receipt
+ * per transaction), or suggested on one (`suggested_bank_txn_id`), or booked on its own as a bill
+ * or entry. Not a ledger record: changes apply at once and are audited.
+ */
+export const receipts = sqliteTable(
+  "receipts",
+  {
+    id: text("id").primaryKey(),
+    status: text("status", { enum: ["inbox", "matched", "booked", "dismissed"] })
+      .notNull()
+      .default("inbox"),
+    merchant: text("merchant"),
+    /** YYYY-MM-DD, and HH:MM when known. */
+    receiptDate: text("receipt_date").notNull(),
+    receiptTime: text("receipt_time"),
+    /** What the card is charged, tip included (positive cents). */
+    amount: integer("amount"),
+    /** The total before the tip, for matching a charge that includes a tip added later. */
+    preTipAmount: integer("pre_tip_amount"),
+    taxAmount: integer("tax_amount"),
+    tipAmount: integer("tip_amount"),
+    /** "Paid with": the bank or card account the charge should show up on. */
+    bankAccountId: text("bank_account_id").references(() => bankAccounts.id),
+    /** The expense account it should be categorized to. */
+    accountId: text("account_id").references(() => accounts.id),
+    contactId: text("contact_id").references(() => contacts.id),
+    memo: text("memo"),
+    businessPurpose: text("business_purpose"),
+    attendees: text("attendees"),
+    location: text("location"),
+    attachmentId: text("attachment_id").references(() => attachments.id),
+    extractionSource: text("extraction_source", { enum: ["manual", "assistant"] })
+      .notNull()
+      .default("manual"),
+    matchedBankTxnId: text("matched_bank_txn_id").references(() => bankTransactions.id),
+    matchMethod: text("match_method", { enum: ["auto", "manual", "confirmed"] }),
+    matchedAt: text("matched_at"),
+    suggestedBankTxnId: text("suggested_bank_txn_id").references(() => bankTransactions.id),
+    /** Transactions a person said are not this receipt; never matched or suggested again. */
+    rejectedTxnIdsJson: text("rejected_txn_ids_json").notNull().default("[]"),
+    bookedTargetType: text("booked_target_type", { enum: ["bill", "journal_entry"] }),
+    bookedTargetId: text("booked_target_id"),
+    dismissedReason: text("dismissed_reason"),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    createdAt: text("created_at").notNull().default(now),
+    updatedAt: text("updated_at").notNull().default(now),
+  },
+  (t) => [
+    index("receipts_status_idx").on(t.status),
+    index("receipts_amount_date_idx").on(t.amount, t.receiptDate),
+    index("receipts_suggested_idx").on(t.suggestedBankTxnId),
+    uniqueIndex("receipts_matched_txn_uq")
+      .on(t.matchedBankTxnId)
+      .where(sql`${t.matchedBankTxnId} is not null`),
+    check("receipts_status_ck", sql`${t.status} in ('inbox','matched','booked','dismissed')`),
+    check("receipts_extraction_source_ck", sql`${t.extractionSource} in ('manual','assistant')`),
+    check(
+      "receipts_match_method_ck",
+      sql`${t.matchMethod} is null or ${t.matchMethod} in ('auto','manual','confirmed')`,
+    ),
+    check("receipts_amount_pos", sql`${t.amount} is null or ${t.amount} > 0`),
+  ],
+);
+
 export const csvProfiles = sqliteTable("csv_profiles", {
   id: text("id").primaryKey(),
   bankAccountId: text("bank_account_id")

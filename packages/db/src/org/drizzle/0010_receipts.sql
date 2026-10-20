@@ -1,0 +1,47 @@
+CREATE TABLE `receipts` (
+	`id` text PRIMARY KEY NOT NULL,
+	`status` text DEFAULT 'inbox' NOT NULL,
+	`merchant` text,
+	`receipt_date` text NOT NULL,
+	`receipt_time` text,
+	`amount` integer,
+	`pre_tip_amount` integer,
+	`tax_amount` integer,
+	`tip_amount` integer,
+	`bank_account_id` text,
+	`account_id` text,
+	`contact_id` text,
+	`memo` text,
+	`business_purpose` text,
+	`attendees` text,
+	`location` text,
+	`attachment_id` text,
+	`extraction_source` text DEFAULT 'manual' NOT NULL,
+	`matched_bank_txn_id` text,
+	`match_method` text,
+	`matched_at` text,
+	`suggested_bank_txn_id` text,
+	`rejected_txn_ids_json` text DEFAULT '[]' NOT NULL,
+	`booked_target_type` text,
+	`booked_target_id` text,
+	`dismissed_reason` text,
+	`created_by` text,
+	`created_by_actor` text DEFAULT 'user' NOT NULL,
+	`created_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+	`updated_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+	FOREIGN KEY (`bank_account_id`) REFERENCES `bank_accounts`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`account_id`) REFERENCES `accounts`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`contact_id`) REFERENCES `contacts`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`attachment_id`) REFERENCES `attachments`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`matched_bank_txn_id`) REFERENCES `bank_transactions`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`suggested_bank_txn_id`) REFERENCES `bank_transactions`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "receipts_status_ck" CHECK("receipts"."status" in ('inbox','matched','booked','dismissed')),
+	CONSTRAINT "receipts_extraction_source_ck" CHECK("receipts"."extraction_source" in ('manual','assistant')),
+	CONSTRAINT "receipts_match_method_ck" CHECK("receipts"."match_method" is null or "receipts"."match_method" in ('auto','manual','confirmed')),
+	CONSTRAINT "receipts_amount_pos" CHECK("receipts"."amount" is null or "receipts"."amount" > 0)
+);
+--> statement-breakpoint
+CREATE INDEX `receipts_status_idx` ON `receipts` (`status`);--> statement-breakpoint
+CREATE INDEX `receipts_amount_date_idx` ON `receipts` (`amount`,`receipt_date`);--> statement-breakpoint
+CREATE INDEX `receipts_suggested_idx` ON `receipts` (`suggested_bank_txn_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `receipts_matched_txn_uq` ON `receipts` (`matched_bank_txn_id`) WHERE "receipts"."matched_bank_txn_id" is not null;

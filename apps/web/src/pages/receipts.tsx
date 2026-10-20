@@ -28,11 +28,10 @@ import { useAccounts } from "../lib/ledger";
 import { useOrgId, useRole } from "../lib/org";
 import {
   type Receipt,
-  readPaidWith,
   takePendingReceiptFile,
   useInvalidateReceipts,
+  useLastPaidWith,
   useReceipt,
-  writePaidWith,
 } from "../lib/receipts";
 import { ContactPicker } from "./invoices";
 
@@ -479,7 +478,13 @@ function ReceiptForm({
   const [date, setDate] = useState(receipt?.receipt_date ?? todayIso());
   const [amount, setAmount] = useState(receipt?.amount != null ? centsToDecimal(receipt.amount) : "");
   const [tip, setTip] = useState(receipt?.tip_amount != null ? centsToDecimal(receipt.tip_amount) : "");
-  const [paidWith, setPaidWith] = useState(receipt ? (receipt.bank_account_id ?? "") : readPaidWith());
+  const [paidWith, setPaidWith] = useState(receipt?.bank_account_id ?? "");
+  // A new receipt defaults to the account the last one was paid with, until the person picks one.
+  const [paidTouched, setPaidTouched] = useState(Boolean(receipt));
+  const lastPaid = useLastPaidWith(orgId, !receipt);
+  useEffect(() => {
+    if (!paidTouched && lastPaid.data) setPaidWith(lastPaid.data);
+  }, [paidTouched, lastPaid.data]);
   const [account, setAccount] = useState(receipt?.account_id ?? "");
   const [contact, setContact] = useState(receipt?.contact_id ?? "");
   const [purpose, setPurpose] = useState(receipt?.business_purpose ?? "");
@@ -538,7 +543,6 @@ function ReceiptForm({
       )) as Receipt;
     },
     onSuccess: async (r) => {
-      writePaidWith(bankId);
       await invalidate(orgId);
       onSaved(r);
     },
@@ -583,7 +587,14 @@ function ReceiptForm({
         </Field>
         <Field label="Paid with">
           {(id) => (
-            <Select id={id} value={bankId} onChange={(e) => setPaidWith(e.target.value)}>
+            <Select
+              id={id}
+              value={bankId}
+              onChange={(e) => {
+                setPaidTouched(true);
+                setPaidWith(e.target.value);
+              }}
+            >
               <option value="">Not sure</option>
               {(banks.data ?? [])
                 .filter((b) => b.is_active)

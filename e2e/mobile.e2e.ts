@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
 import { signIn } from "./auth.ts";
 
@@ -37,6 +38,8 @@ test("no page scrolls sideways", async ({ page }) => {
   const paths = [
     "",
     "/banking/categorize",
+    "/banking/receipts",
+    "/banking/receipts/new",
     "/banking/import",
     "/banking/rules",
     "/banking/reconcile",
@@ -160,4 +163,72 @@ test("tap targets are at least 44px on Categorize and the review queue", async (
   await expect(page.getByRole("button", { name: "Approve", exact: true }).first()).toBeVisible();
   expect(await tooSmall("main")).toEqual([]);
   await shot(page, "review");
+});
+
+test("snap a receipt, then the bank charge arrives and Categorize suggests it", async ({ page }) => {
+  await signIn(page);
+  await page.goto(base);
+  // The header button opens the chooser, then the capture form with the photo in hand.
+  await page
+    .getByRole("banner")
+    .locator('input[type="file"]')
+    .setInputFiles(join(import.meta.dirname, "fixtures/receipt.jpg"));
+  await expect(page).toHaveURL(/\/banking\/receipts\/new/);
+  await expect(page.getByAltText("Receipt preview")).toBeVisible();
+  await page.getByLabel("Merchant").fill("Professor Java's");
+  await page.getByLabel("Amount charged").fill("8.69");
+  await page.getByLabel("Account", { exact: true }).fill("meals");
+  await page.getByRole("listbox").getByRole("option").first().click();
+  await shot(page, "receipt-new");
+  expect(await overflow(page)).toBeLessThanOrEqual(0);
+  await page.getByRole("button", { name: "Save receipt" }).click();
+
+  // It waits in the Inbox until the bank feed catches up.
+  await expect(page).toHaveURL(/\/banking\/receipts$/);
+  const receipt = page.getByRole("listitem").filter({ hasText: "Professor Java's" });
+  await expect(receipt.getByText("Waiting for bank")).toBeVisible();
+  await expect(receipt.getByRole("img", { name: "Receipt" })).toBeVisible();
+  await shot(page, "receipts");
+  const small = await page
+    .locator("main button:visible, main select:visible, main input:visible:not([type=file])")
+    .evaluateAll((els) =>
+      els.map((e) => ({
+        text: (e.textContent || "").trim().slice(0, 30),
+        h: e.getBoundingClientRect().height,
+      })),
+    );
+  expect(small.filter((x) => x.h < 43.5)).toEqual([]);
+  expect(await overflow(page)).toBeLessThanOrEqual(0);
+
+  // The charge arrives (a CSV import stands in for the feed) and is matched to the receipt.
+  const today = new Date().toISOString().slice(0, 10);
+  await page.goto(`${base}/banking/import`);
+  await page.getByLabel("Statement file").setInputFiles({
+    name: "java.csv",
+    mimeType: "text/csv",
+    buffer: Buffer.from(`Date,Description,Amount\n${today},PROFESSOR JAVAS ALBANY NY,-8.69\n`),
+  });
+  await page.getByRole("button", { name: "Import 1 transactions" }).click();
+  await expect(page.getByText(/Imported 1/)).toBeVisible();
+
+  await page.goto(`${base}/banking/categorize?status=todo`);
+  const txn = page.locator("ul li > button[aria-expanded]").filter({ hasText: "PROFESSOR JAVAS" });
+  await expect(txn.getByText(/From receipt/)).toBeVisible();
+  await txn.click();
+  const row = page.locator("li:has(> button[aria-expanded=true])");
+  await expect(
+    row.getByText("Possible receipt").or(row.getByText("Receipt: Professor Java's")),
+  ).toBeVisible();
+  await shot(page, "categorize-receipt");
+  await row.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("PROFESSOR JAVAS")).toHaveCount(0);
+
+  await page.goto(`${base}/banking/receipts`);
+  await page.getByRole("tab", { name: "Matched" }).click();
+  await expect(
+    page
+      .getByRole("listitem")
+      .filter({ hasText: "Professor Java's" })
+      .getByText(/Matched to .*PROFESSOR JAVAS/),
+  ).toBeVisible();
 });

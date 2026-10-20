@@ -87,9 +87,8 @@ export const ReceiptSchema = z
     match_method: z.enum(["auto", "manual", "confirmed"]).nullable(),
     matched_at: z.string().nullable(),
     suggested_bank_txn_id: z.string().nullable(),
-    transaction: TxnSummarySchema.nullable().openapi({
-      description: "The matched transaction, else the suggested one",
-    }),
+    /** The matched transaction, else the suggested one. */
+    transaction: z.union([TxnSummarySchema, z.null()]),
     rejected_txn_ids: z.array(z.string()),
     booked_target_type: z.enum(["bill", "journal_entry"]).nullable(),
     booked_target_id: z.string().nullable(),

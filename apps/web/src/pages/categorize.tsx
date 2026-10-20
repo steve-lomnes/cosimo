@@ -22,7 +22,9 @@ import { type BankTxn, useBankAccounts } from "../lib/banking";
 import { centsToDecimal, fmtDate, money, tryParseCents } from "../lib/format";
 import { type Account, useAccounts } from "../lib/ledger";
 import { useOrg, useOrgId, useRole } from "../lib/org";
+import { useInvalidateReceipts, useReceipt } from "../lib/receipts";
 import { ContactPicker } from "./invoices";
+import { Thumb } from "./receipts";
 
 type Filter = "all" | "todo" | "pending" | "categorized" | "excluded";
 type Mode = "categorize" | "split" | "transfer" | "match" | "payment";
@@ -233,6 +235,8 @@ function TxnRow({
   }, [open]);
   const sug = t.suggestion;
   const sugAccount = sug?.account_id ? accounts.find((a) => a.id === sug.account_id) : null;
+  const fromReceipt = sug?.source === "receipt";
+  const receiptIds = t.receipt_id ? [t.receipt_id] : t.suggested_receipt_ids;
   const sugTransfer = sug?.transfer_account_id
     ? accounts.find((a) => a.id === sug.transfer_account_id)
     : null;
@@ -255,7 +259,7 @@ function TxnRow({
             {t.review_item_id && <Badge tone="amber">In review queue</Badge>}
             {t.status === "new" && !t.review_item_id && sugAccount && (
               <span>
-                Suggested: {sugAccount.name}
+                {fromReceipt ? "From receipt" : "Suggested"}: {sugAccount.name}
                 {sug?.source === "rule" && sug.rule_name ? ` (rule: ${sug.rule_name})` : ""}
               </span>
             )}
@@ -265,6 +269,12 @@ function TxnRow({
                   ? `Stripe payout ${fmtDate(sug.payout_arrival_date)}: transfer from ${sugTransfer.name}`
                   : `Suggested transfer: ${sugTransfer.name}`}
               </span>
+            )}
+            {receiptIds.length > 0 && (
+              <Badge tone={t.receipt_id ? "green" : "amber"}>
+                <span aria-hidden="true">🧾 </span>
+                {t.receipt_id ? "Receipt" : "Receipt suggested"}
+              </Badge>
             )}
             {t.status === "matched" && <Badge tone="blue">Matched</Badge>}
             {t.status === "categorized" && <Badge tone="green">Categorized</Badge>}
@@ -278,8 +288,11 @@ function TxnRow({
           <p className="break-words text-sm text-zinc-700 dark:text-zinc-300">
             {t.payee && t.payee !== t.description ? `${t.payee} · ${t.description}` : t.description}
           </p>
+          {receiptIds.map((id) => (
+            <TxnReceipt key={id} receiptId={id} t={t} />
+          ))}
           {t.status === "new" && !t.review_item_id ? (
-            <Editor t={t} accounts={accounts} onDone={onDone} />
+            <Editor key={JSON.stringify(sug)} t={t} accounts={accounts} onDone={onDone} />
           ) : (
             <Done t={t} orgId={orgId} />
           )}
@@ -287,6 +300,78 @@ function TxnRow({
         </div>
       )}
     </li>
+  );
+}
+
+/** The receipt behind a row: thumbnail and details, fetched when the row opens. */
+function TxnReceipt({ receiptId, t }: { receiptId: string; t: BankTxn }) {
+  const orgId = useOrgId();
+  const { canWrite } = useRole();
+  const invalidateReceipts = useInvalidateReceipts();
+  const q = useReceipt(orgId, receiptId);
+  const r = q.data;
+  const matched = t.receipt_id === receiptId;
+  const act = useMutation({
+    mutationFn: (kind: "match" | "unmatch") =>
+      kind === "match"
+        ? unwrap(
+            api.POST("/api/v1/orgs/{orgId}/receipts/{receiptId}/match", {
+              params: { path: { orgId, receiptId } },
+              body: { bank_transaction_id: t.id },
+            }),
+          )
+        : unwrap(
+            api.POST("/api/v1/orgs/{orgId}/receipts/{receiptId}/unmatch", {
+              params: { path: { orgId, receiptId } },
+            }),
+          ),
+    onSuccess: () => invalidateReceipts(orgId),
+  });
+  if (q.isLoading) return <Loading />;
+  if (!r) return <ErrorText error={q.error} />;
+  return (
+    <div className="space-y-2 rounded-md bg-white p-3 text-sm ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-800">
+      <div className="flex items-start gap-3">
+        <Thumb r={r} />
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">
+            {matched ? "Receipt" : "Possible receipt"}: {r.merchant || "(no merchant)"}
+            {r.amount != null && <> · {money(r.amount)}</>}
+          </p>
+          {r.business_purpose && <p className="break-words">Purpose: {r.business_purpose}</p>}
+          {r.attendees && <p className="break-words">Attendees: {r.attendees}</p>}
+          <Link
+            to="/o/$orgId/banking/receipts/$receiptId"
+            params={{ orgId, receiptId }}
+            className="text-xs underline"
+          >
+            Open receipt
+          </Link>
+        </div>
+      </div>
+      {canWrite && (
+        <div className="flex flex-wrap gap-2">
+          {!matched && (
+            <Button
+              size="sm"
+              loading={act.isPending && act.variables === "match"}
+              onClick={() => act.mutate("match")}
+            >
+              Confirm receipt
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={act.isPending && act.variables === "unmatch"}
+            onClick={() => act.mutate("unmatch")}
+          >
+            Not this receipt
+          </Button>
+        </div>
+      )}
+      <ErrorText error={act.error} />
+    </div>
   );
 }
 
@@ -300,6 +385,8 @@ function useInvalidate() {
       qc.invalidateQueries({ queryKey: ["accounts", orgId] }),
       qc.invalidateQueries({ queryKey: ["review", orgId] }),
       qc.invalidateQueries({ queryKey: ["entries", orgId] }),
+      // Categorizing confirms a suggested receipt.
+      qc.invalidateQueries({ queryKey: ["receipts", orgId] }),
     ]);
   };
 }

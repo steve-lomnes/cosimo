@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { api, unwrap } from "../api/client";
 import type { components } from "../api/schema";
+import { SnapReceipt } from "../components/SnapReceipt";
 import { Amount, Badge, Card, cx, ErrorText, Loading, PageHeader, Table, td, th } from "../components/ui";
 import { fmtDate, fmtDateTime, money } from "../lib/format";
 import { useOrg, useOrgId } from "../lib/org";
@@ -30,6 +31,7 @@ export function DashboardPage() {
         subtitle={
           d ? `As of ${fmtDate(d.as_of)} · ${d.basis === "cash" ? "Cash" : "Accrual"} basis` : "Overview"
         }
+        actions={<SnapReceipt className="hidden lg:inline-flex" />}
       />
       <ErrorText error={q.error} />
       {q.isLoading || !d ? q.error ? null : <Loading /> : <DashboardBody d={d} orgId={orgId} />}
@@ -62,6 +64,19 @@ function DashboardBody({ d, orgId }: { d: Dashboard; orgId: string }) {
             </Link>
           }
         />
+        {d.stale_receipts.count > 0 && (
+          <Tile
+            label="Unmatched receipts"
+            value={d.stale_receipts.count}
+            detail="In the inbox for over 30 days"
+            attention
+            link={
+              <Link to="/o/$orgId/banking/receipts" params={{ orgId }} className={tileLink}>
+                Receipts
+              </Link>
+            }
+          />
+        )}
         <Tile
           label="Waiting for approval"
           value={d.review_pending}

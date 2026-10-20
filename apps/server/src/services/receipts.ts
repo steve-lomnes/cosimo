@@ -120,7 +120,7 @@ function txnSummary(t: BankTxnRow): ReceiptTxnSummary {
 
 /** The receipt's page in the web app, where a person can add the photo (MCP `attach_url`). */
 export function receiptAttachUrl(publicUrl: string, orgId: string, id: string) {
-  return `${publicUrl.replace(/\/$/, "")}/o/${orgId}/banking/receipts/${id}`;
+  return `${publicUrl.replace(/\/$/, "")}/o/${orgId}/expenses/receipts/${id}`;
 }
 
 function staleCutoff(asOf = today()) {

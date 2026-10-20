@@ -6,7 +6,6 @@ import { groupOrgs } from "../lib/org";
 import { useSession } from "../lib/session";
 import { getTheme, setTheme, type Theme } from "../lib/theme";
 import { useUpdateStatus } from "../lib/updates";
-import { SnapReceipt } from "./SnapReceipt";
 import { cx } from "./ui";
 
 export interface NavItem {
@@ -27,7 +26,6 @@ export function navFor(orgId: string): NavGroup[] {
       label: "Banking",
       items: [
         { to: `${o}/banking/categorize`, label: "Categorize" },
-        { to: `${o}/banking/receipts`, label: "Receipts" },
         { to: `${o}/banking/import`, label: "Import" },
         { to: `${o}/banking/rules`, label: "Rules" },
         { to: `${o}/banking/reconcile`, label: "Reconcile" },
@@ -45,6 +43,7 @@ export function navFor(orgId: string): NavGroup[] {
       label: "Expenses",
       items: [
         { to: `${o}/expenses/bills`, label: "Bills" },
+        { to: `${o}/expenses/receipts`, label: "Receipts" },
         { to: `${o}/expenses/vendors`, label: "Vendors" },
       ],
     },
@@ -250,7 +249,6 @@ export function Shell({ orgId, children }: { orgId: string; children: ReactNode 
             ☰
           </button>
           <OrgSwitcher orgId={orgId} />
-          <SnapReceipt className="ml-auto lg:hidden" />
           <div className="ml-auto hidden items-center gap-1 lg:flex">
             <ThemeToggle />
             <UserMenu />

@@ -30,7 +30,7 @@ export function SnapReceipt({ className }: { className?: string }) {
           e.target.value = "";
           if (!f) return;
           setPendingReceiptFile(f);
-          navigate({ to: "/o/$orgId/banking/receipts/new", params: { orgId } } as never);
+          navigate({ to: "/o/$orgId/expenses/receipts/new", params: { orgId } } as never);
         }}
       />
     </label>

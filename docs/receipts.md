@@ -8,9 +8,9 @@ booked as a bill or a journal entry instead.
 
 ## Capture a receipt
 
-- **In Cosimo.** On a phone, tap **Snap receipt** in the header. On a computer, use the button on the
-  dashboard or **Banking → Receipts**. Take a photo or pick a file, then fill in what you know. Only
-  the photo or the amount is required.
+- **In Cosimo.** Open **Expenses → Receipts** and tap **Snap receipt**. Take a photo or pick a
+  file. Fill in what you know, or leave everything but the photo for an assistant to fill in. Only the
+  photo or the amount is required.
 - **From the share sheet on an iPhone.** Set up the Shortcut below once. After that, share a photo to
   **Send to Cosimo** from Photos or the camera and it lands in the inbox.
 - **With an AI assistant.** Connect an assistant ([docs/mcp.md](mcp.md)) and ask it to "fill in my new
@@ -76,7 +76,7 @@ In the **Shortcuts** app, tap **+** to make a new shortcut and name it **Send to
      Image**, or **Shortcut Input** if you skipped step 2.
 4. **Optional: open the receipt to add details now.** Add **Get Dictionary Value**, getting the value
    for `id` from **Contents of URL**. Then add **Open URLs** with
-   `https://books.example.com/o/<organization ID>/banking/receipts/` followed by **Dictionary Value**.
+   `https://books.example.com/o/<organization ID>/expenses/receipts/` followed by **Dictionary Value**.
    Without this step the receipt waits in the inbox, where you or an assistant can fill it in later.
 5. **Optional: confirm it worked.** Add **Show Notification** with "Receipt sent to Cosimo".
 
@@ -85,7 +85,7 @@ Replace `https://books.example.com` with your Cosimo address.
 ### 3. Use it
 
 In Photos, or right after taking a picture, tap **Share** and then **Send to Cosimo**. The receipt
-appears under **Banking → Receipts → Inbox**. To fill in its details, open it in Cosimo, or ask your
+appears under **Expenses → Receipts → Inbox**. To fill in its details, open it in Cosimo, or ask your
 assistant to "fill in my new receipts".
 
 ### Adding details from the Shortcut

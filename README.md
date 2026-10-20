@@ -6,7 +6,7 @@
 [![CI](https://github.com/steve-lomnes/cosimo/actions/workflows/ci.yml/badge.svg)](https://github.com/steve-lomnes/cosimo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Quickstart](#quickstart) · [Deploy](docs/deployment.md) · [Import from QuickBooks, Xero or Wave](docs/importing.md) · [Use with AI](docs/mcp.md)
+[Quickstart](#quickstart) · [Deploy](docs/deployment.md) · [Import from QuickBooks, Xero or Wave](docs/importing.md) · [Use with AI](docs/mcp.md) · [Receipts](docs/receipts.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.webp">

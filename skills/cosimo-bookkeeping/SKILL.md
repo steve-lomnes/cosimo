@@ -93,7 +93,8 @@ so there are two ways to work:
   even when the photo was HEIC). Read it and call `update_receipt` with what it says: `merchant`,
   `date`, `time`, `amount`, `pre_tip_amount`, `tax_amount`, `tip_amount`, and the expense
   `account`. Ask the person for the business purpose and attendees of a meal if they aren't written
-  on it.
+  on it. Receipts sent from an iPhone with the "Send to Cosimo" Shortcut (docs/receipts.md) arrive
+  this way too: a photo with no fields.
 - **(b) The person shares the photo with you in chat.** Read it, call `create_receipt` with the
   fields, and give the person the `attach_url` from the result, so they can tap it and add the
   same photo in Cosimo (a receipt without its image is weak evidence).

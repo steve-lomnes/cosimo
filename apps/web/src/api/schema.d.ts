@@ -21943,7 +21943,7 @@ export interface components {
             match_method: "auto" | "manual" | "confirmed" | null;
             matched_at: string | null;
             suggested_bank_txn_id: string | null;
-            transaction: components["schemas"]["ReceiptTransaction"];
+            transaction: components["schemas"]["ReceiptTransaction"] | null;
             rejected_txn_ids: string[];
             /** @enum {string|null} */
             booked_target_type: "bill" | "journal_entry" | null;
@@ -21955,7 +21955,6 @@ export interface components {
             created_at: string;
             updated_at: string;
         };
-        /** @description The matched transaction, else the suggested one */
         ReceiptTransaction: {
             id: string;
             bank_account_id: string;
@@ -21970,7 +21969,7 @@ export interface components {
             /** @enum {string} */
             status: "new" | "categorized" | "matched" | "excluded";
             entry_id: string | null;
-        } | null;
+        };
         ReceiptCandidate: {
             transaction: components["schemas"]["ReceiptTransaction"];
             /** @enum {string} */

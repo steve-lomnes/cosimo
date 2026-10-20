@@ -563,6 +563,26 @@ describe(`receipt inbox (${DB_MODE})`, () => {
     expect(bad.body.error.code).toBe("heic_unsupported");
   });
 
+  test("an iOS Shortcut posts just the photo with a propose-only token (docs/receipts.md)", async () => {
+    const t = await owner.json("POST", "/api/v1/tokens", {
+      org_id: orgId,
+      name: "iPhone Shortcut",
+      role: "bookkeeper",
+      propose_only: true,
+    });
+    const fd = new FormData();
+    fd.set("file", new File([HEIC], "IMG_0042.HEIC", { type: "application/octet-stream" }));
+    const res = await env.app.request(`${base()}/receipts`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${t.body.token}` },
+      body: fd,
+    });
+    expect(res.status).toBe(201);
+    const r = (await res.json()) as any;
+    expect(r).toMatchObject({ status: "inbox", amount: null });
+    expect(r.attachment).toMatchObject({ mime_type: "image/jpeg", filename: "IMG_0042.jpg" });
+  });
+
   test("replacing the file moves every link to the new one", async () => {
     const before = await getReceipt(javaReceipt);
     const oldId = before.attachment.id;

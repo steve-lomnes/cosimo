@@ -341,7 +341,7 @@ function TxnReceipt({ receiptId, t }: { receiptId: string; t: BankTxn }) {
           {r.business_purpose && <p className="break-words">Purpose: {r.business_purpose}</p>}
           {r.attendees && <p className="break-words">Attendees: {r.attendees}</p>}
           <Link
-            to="/o/$orgId/banking/receipts/$receiptId"
+            to="/o/$orgId/expenses/receipts/$receiptId"
             params={{ orgId, receiptId }}
             className="text-xs underline"
           >

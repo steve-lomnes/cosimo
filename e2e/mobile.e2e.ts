@@ -38,8 +38,8 @@ test("no page scrolls sideways", async ({ page }) => {
   const paths = [
     "",
     "/banking/categorize",
-    "/banking/receipts",
-    "/banking/receipts/new",
+    "/expenses/receipts",
+    "/expenses/receipts/new",
     "/banking/import",
     "/banking/rules",
     "/banking/reconcile",
@@ -167,13 +167,14 @@ test("tap targets are at least 44px on Categorize and the review queue", async (
 
 test("snap a receipt, then the bank charge arrives and Categorize suggests it", async ({ page }) => {
   await signIn(page);
-  await page.goto(base);
-  // The header button opens the chooser, then the capture form with the photo in hand.
+  await page.goto(`${base}/expenses/receipts`);
+  // The Receipts page's Snap button opens the chooser, then the capture form with the photo in hand.
   await page
-    .getByRole("banner")
+    .getByRole("main")
     .locator('input[type="file"]')
+    .first()
     .setInputFiles(join(import.meta.dirname, "fixtures/receipt.jpg"));
-  await expect(page).toHaveURL(/\/banking\/receipts\/new/);
+  await expect(page).toHaveURL(/\/expenses\/receipts\/new/);
   await expect(page.getByAltText("Receipt preview")).toBeVisible();
   await page.getByLabel("Merchant").fill("Professor Java's");
   await page.getByLabel("Amount charged").fill("8.69");
@@ -184,7 +185,7 @@ test("snap a receipt, then the bank charge arrives and Categorize suggests it", 
   await page.getByRole("button", { name: "Save receipt" }).click();
 
   // It waits in the Inbox until the bank feed catches up.
-  await expect(page).toHaveURL(/\/banking\/receipts$/);
+  await expect(page).toHaveURL(/\/expenses\/receipts$/);
   const receipt = page.getByRole("listitem").filter({ hasText: "Professor Java's" });
   await expect(receipt.getByText("Waiting for bank")).toBeVisible();
   await expect(receipt.getByRole("img", { name: "Receipt" })).toBeVisible();
@@ -223,7 +224,9 @@ test("snap a receipt, then the bank charge arrives and Categorize suggests it", 
   await row.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText("PROFESSOR JAVAS")).toHaveCount(0);
 
+  // A 0.8.0 link under Banking (an assistant's attach_url) still lands on the receipts page.
   await page.goto(`${base}/banking/receipts`);
+  await expect(page).toHaveURL(/\/expenses\/receipts$/);
   await page.getByRole("tab", { name: "Matched" }).click();
   await expect(
     page

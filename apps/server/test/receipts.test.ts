@@ -661,7 +661,7 @@ describe(`receipts over MCP (${DB_MODE})`, () => {
     expect(rec).toMatchObject({ extraction_source: "assistant", account_id: meals, amount: 2350 });
     expect(rec.attachment).toMatchObject({ mime_type: "image/jpeg", filename: "IMG_0002.jpg" });
     expect(r.structuredContent.attach_url).toBe(
-      `${env.config.server.public_url.replace(/\/$/, "")}/o/${orgId}/banking/receipts/${rec.id}`,
+      `${env.config.server.public_url.replace(/\/$/, "")}/o/${orgId}/expenses/receipts/${rec.id}`,
     );
     expect((await auditFor("receipt.create", rec.id))[0]!.actor).toBe("mcp");
 
@@ -674,7 +674,7 @@ describe(`receipts over MCP (${DB_MODE})`, () => {
     expect([...img.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
     const dims = jpeg.decode(img);
     expect(Math.max(dims.width, dims.height)).toBeLessThanOrEqual(1568);
-    expect(g.structuredContent.attach_url).toContain(`/banking/receipts/${rec.id}`);
+    expect(g.structuredContent.attach_url).toContain(`/expenses/receipts/${rec.id}`);
 
     // Fields only: no file, and the result says where to add the photo.
     const f = await call("create_receipt", { merchant: "Food Truck", amount: 1200 });

@@ -54,9 +54,20 @@ export function orgChildRoutes(parent: AnyRoute): AnyRoute[] {
         throw redirect({ href: location.href.replace("/banking/review", "/banking/categorize") });
       },
     }) as unknown as AnyRoute,
-    r("/banking/receipts", ReceiptsPage),
-    r("/banking/receipts/new", NewReceiptPage),
-    r("/banking/receipts/$receiptId", ReceiptPage),
+    // Receipts lived under Banking in 0.8.0, and assistants handed out links there; keep them working.
+    ...["/banking/receipts", "/banking/receipts/$"].map(
+      (path) =>
+        createRoute({
+          getParentRoute: () => parent,
+          path,
+          beforeLoad: ({ location }) => {
+            throw redirect({ href: location.href.replace("/banking/receipts", "/expenses/receipts") });
+          },
+        }) as unknown as AnyRoute,
+    ),
+    r("/expenses/receipts", ReceiptsPage),
+    r("/expenses/receipts/new", NewReceiptPage),
+    r("/expenses/receipts/$receiptId", ReceiptPage),
     r("/banking/rules", RulesPage),
     r("/banking/reconcile", ReconcileListPage),
     r("/banking/reconcile/$reconId", ReconcilePage),

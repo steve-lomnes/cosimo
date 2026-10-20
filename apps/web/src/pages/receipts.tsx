@@ -70,7 +70,7 @@ export function ReceiptsPage() {
           canWrite && (
             <>
               <SnapReceipt />
-              <Link to="/o/$orgId/banking/receipts/new" params={{ orgId }}>
+              <Link to="/o/$orgId/expenses/receipts/new" params={{ orgId }}>
                 <Button variant="secondary">Enter by hand</Button>
               </Link>
             </>
@@ -176,7 +176,7 @@ function ReceiptRow({ r }: { r: Receipt }) {
         <div className="min-w-0 flex-1 text-sm">
           <div className="flex flex-wrap items-baseline justify-between gap-x-3">
             <Link
-              to="/o/$orgId/banking/receipts/$receiptId"
+              to="/o/$orgId/expenses/receipts/$receiptId"
               params={{ orgId, receiptId: r.id }}
               className="min-w-0 break-words font-medium hover:underline"
             >
@@ -237,7 +237,7 @@ export function ReceiptActions({ r, showEdit = true }: { r: Receipt; showEdit?: 
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
         {showEdit && r.status !== "booked" && (
-          <Link to="/o/$orgId/banking/receipts/$receiptId" params={{ orgId, receiptId: r.id }}>
+          <Link to="/o/$orgId/expenses/receipts/$receiptId" params={{ orgId, receiptId: r.id }}>
             <Button size="sm" variant="secondary">
               Edit
             </Button>
@@ -684,7 +684,7 @@ export function NewReceiptPage() {
         </div>
         <ReceiptForm
           file={file}
-          onSaved={() => navigate({ to: "/o/$orgId/banking/receipts", params: { orgId } } as never)}
+          onSaved={() => navigate({ to: "/o/$orgId/expenses/receipts", params: { orgId } } as never)}
         />
       </Card>
     </>
@@ -769,7 +769,7 @@ export function ReceiptPage() {
           </>
         }
         actions={
-          <Link to="/o/$orgId/banking/receipts" params={{ orgId }}>
+          <Link to="/o/$orgId/expenses/receipts" params={{ orgId }}>
             <Button variant="secondary">All receipts</Button>
           </Link>
         }

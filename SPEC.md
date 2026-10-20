@@ -212,6 +212,10 @@ All IDs are ULIDs stored as TEXT. All timestamps are UTC ISO 8601 TEXT. All mone
   - `status`: new, categorized, matched, excluded
   - Unique index on (bank_account_id, provider_transaction_id) where not null
   - Unique index on (bank_account_id, dedupe_hash)
+- `receipts` (id, status, merchant, receipt_date, receipt_time, amount, pre_tip_amount, tax_amount, tip_amount, bank_account_id, account_id, contact_id, memo, business_purpose, attendees, location, attachment_id, extraction_source, matched_bank_txn_id, match_method, matched_at, suggested_bank_txn_id, rejected_txn_ids_json, booked_target_type, booked_target_id, dismissed_reason, created_by, created_by_actor, created_at, updated_at)
+  - `status`: inbox, matched, booked, dismissed. `extraction_source`: manual, assistant. `match_method`: auto, manual, confirmed
+  - `amount` is what the card is charged, tip included (positive cents); `pre_tip_amount` is the total before a tip
+  - Unique index on `matched_bank_txn_id` where not null: at most one receipt per bank transaction
 - `csv_profiles` (id, bank_account_id, column_map_json, date_format, amount_mode, sign_convention, skip_rows)
 - `rules` (id, name, priority, conditions_json, actions_json, is_active, times_applied)
 - `review_items` (id, item_type, item_id, proposed_by_actor, proposed_by_id, reason, rationale, status, decided_by, decided_at, decision_note, created_at)
@@ -327,6 +331,16 @@ The Categorize screen (Banking → Categorize) is the main daily workflow. For e
 
 **Suggestions**: when no rule matches, suggest an account based on the most recent categorization of the same normalized payee.
 
+**Receipt inbox** (Banking → Receipts). A receipt photographed when paying, with its business details (merchant, amount charged, pre-tip total, tax, tip, paid-with account, expense account, business purpose, attendees), waits in the inbox until the card charge reaches the feed. Receipts are not ledger records: every change applies at once and is audited (`receipt.create`, `.update`, `.match`, `.unmatch`, `.dismiss`, `.restore`, `.book`).
+
+- A charge fits a receipt when it is a posted outflow, not excluded, dated from 1 day before the receipt to 7 days after, for the receipt's amount exactly, or for the pre-tip total plus a tip of up to 35% (rounded down) when the merchant also matches. The merchant matches when any of its normalized words of 4 or more letters (not "the", "llc", "inc", "store", "corp", "company", "shop") appears in the transaction's description or payee.
+- Matching runs when an import or sync brings transactions (before rules) and when a receipt is created, its amounts, date, merchant or account change, a file is attached, or it is restored. It matches automatically only when the receipt and the transaction are each other's only fit, the amount is exact, and the merchant matches or the receipt names the transaction's bank account. Otherwise the receipt is suggested for its best fit (closest date, then merchant, then ID). Auto-matching during an import or sync is audited under the system actor.
+- A matched receipt's file is linked to the transaction and to its entry. When exactly one receipt is matched to or suggested for a transaction still to categorize, it is the transaction's suggestion (`source: receipt`: account, contact, and memo, which defaults to "Merchant: purpose"); it outranks payout and history suggestions. A rule keeps its account and takes the receipt's memo when it has none.
+- Categorizing a transaction (by a person, an assistant, or a rule) confirms its suggested receipt and links the file to the new entry, posted or proposed. Undo keeps the match. "Not this receipt" unmatches the pair, and that transaction is never matched or suggested for the receipt again unless someone picks it by hand.
+- Excluding a transaction, or the bank removing one still to categorize, returns its receipt to the inbox to be matched again.
+- A receipt that will never meet a bank transaction is booked from the inbox: as a draft bill (vendor from the receipt's contact) to finalize on the bill page, or as an entry crediting another account (for example owner's equity for a personal card) through the review policy. It can also be dismissed and restored.
+- An image uploaded as HEIC (iPhone photos) is converted to JPEG on upload, for receipts and every other attachment.
+
 ### 7.4 Reconciliation
 
 - Start from a bank or credit card account, enter statement end date and ending balance.
@@ -416,7 +430,7 @@ One action produces a ZIP containing: P&L, Balance Sheet, Trial Balance, General
 
 ### 9.2 Dashboard
 
-Cash balance across bank accounts, income and expense for the current month and year to date, count of transactions needing review, overdue invoices, and bank connections needing attention.
+Cash balance across bank accounts, income and expense for the current month and year to date, count of transactions needing review, receipts left in the inbox for more than 30 days, overdue invoices, and bank connections needing attention.
 
 ---
 
@@ -445,12 +459,13 @@ Tools, at minimum:
 - `list_contacts`, `create_contact`, `update_contact`, `list_invoices`, `create_invoice_draft`
 - `list_bills`, `list_bill_payments`, `list_invoice_payments`, `create_bill_draft`, `record_invoice_payment`, `record_bill_payment`
 - `propose_reversal`, `propose_replacement`, `propose_payment_date_change`, `withdraw_proposal`
+- `list_receipts`, `get_receipt`, `create_receipt`, `update_receipt`, `match_receipt`, `unmatch_receipt`, `dismiss_receipt`
 
 `get_entry` and `list_entries` fill in each line's account code/name and, when set, contact name, and whether the entry has an attachment; the REST `EntryView` itself carries only IDs.
 
 Corrections to posted entries go through the review queue like any other write. `propose_reversal` creates a pending reversal entry. `propose_replacement` creates one `entry_replacement` review item: approving it posts the reversal and the corrected entry together, and rejecting it posts neither. `propose_payment_date_change` creates one `payment_redate` review item: approving it reverses the payment's entry on its original date, posts the same lines on the new date, and moves the payment, its applications, and any matched bank transaction to the new entry. `record_invoice_payment` proposes a customer payment applied to one or more invoices (optionally from a bank deposit); `record_bill_payment` proposes a vendor payment applied to bills. Payments in either direction move through a bank, other current asset, credit card, other current liability, or owner's equity account (so an owner-paid bill settles Dr Accounts Payable / Cr the liability or equity account), never accounts payable or receivable; the tool counts payments already waiting in review against each invoice's open balance, and approving any invoice or bill payment from the review queue is refused (409 `over_applied`) if its documents no longer have that much open. Entries created by documents (invoices, bills, payments) can't be reversed or replaced through MCP; a payment's date is the one correction allowed. An assistant may withdraw its own pending proposals with `withdraw_proposal` (the item ends rejected with a note, and every side effect unwinds as on rejection); it can't withdraw anyone else's, and it never approves or rejects. Void, delete, and changing lock dates are not exposed through MCP.
 
-`create_contact` and `update_contact` apply directly, without a review item, because contacts don't touch the books; the audit log records them.
+`create_contact` and `update_contact` apply directly, without a review item, because contacts don't touch the books; the audit log records them. The receipt tools apply directly for the same reason; categorizing the matched transaction still goes through review. `get_receipt` returns the receipt's image after its JSON as MCP image content (a JPEG, downscaled to a long edge of 1568 px), or a PDF as an embedded resource, so the assistant can read it and fill in the fields with `update_receipt`; `create_receipt` takes the fields (and optionally a file as base64, up to 10 MB) and returns `attach_url`, the receipt's page in Cosimo, where the person adds the photo the assistant read in chat.
 
 MCP tools that change the books MUST accept a `rationale` string. Every MCP write to the books lands in the review queue (Section 7.5) unless a review policy auto-approves it. Write tools return the review item ID and its status so the assistant can tell the human what is waiting. Additional tools: `list_pending_reviews` and `get_review_item`. Approving is not exposed through MCP in v1, so an AI cannot approve its own proposals.
 
@@ -485,7 +500,7 @@ The MCP endpoint MUST support OAuth 2.1 per the MCP authorization specification,
 - Navigation: Dashboard, Banking (review, rules, reconcile, connections, import), Sales (invoices, customers), Expenses (bills, vendors), Accounting (chart of accounts, journal entries), Reports, Settings.
 - Org switcher in the header for users with more than one org.
 - Keyboard-first Categorize screen: arrow keys to move, a shortcut to accept suggestion, typeahead account picker.
-- Responsive layout usable on a phone for Categorize, receipt upload from the camera, and dashboard.
+- Responsive layout usable on a phone for Categorize, receipt capture from the camera (the receipt inbox, Section 7.3), and dashboard.
 - Light and dark themes.
 - All amounts right-aligned in tabular numerals. Negative amounts shown in parentheses in reports.
 - Accessibility: keyboard navigable, labeled inputs, sufficient contrast.
@@ -833,5 +848,5 @@ Resolve these before or at the start of the build session. Defaults apply if not
 | Multi-currency in v1 | Out |
 | Recurring invoices in v1 | Included as a SHOULD |
 | Online invoice payments (Stripe or similar) | Added after v1 (#55): the org's own Stripe account through Checkout, behind a provider interface, plus a pasted payment link mode. See §8.1. |
-| Receipt OCR | Out of v1. Attachments only. |
+| Receipt OCR | No server-side OCR. The receipt inbox (Section 7.3) stores the photo and its fields; a connected AI assistant reads the image over MCP (`get_receipt`) and fills them in. |
 | Windows as a server target | Local only in v1 |

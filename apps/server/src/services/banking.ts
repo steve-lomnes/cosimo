@@ -9,7 +9,7 @@ import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import { addDays } from "@cosimo/shared";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, type SQL, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
-import type { ActorInfo } from "./actor.ts";
+import { type ActorInfo, SYSTEM_ACTOR } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
 import { type SyncStatusView, syncStatusView } from "./bank-sync.ts";
 import {
@@ -21,6 +21,13 @@ import {
   settingsRow,
   submitEntryTx,
 } from "./ledger.ts";
+import {
+  matchForReceiptTx,
+  matchForTxnTx,
+  onTxnCategorizedTx,
+  releaseReceiptsForTxnTx,
+  withReceipts,
+} from "./receipts.ts";
 
 type Reader = OrgDb | OrgTx;
 type BankAccountRow = typeof org.bankAccounts.$inferSelect;
@@ -260,10 +267,14 @@ export interface BankTxnView {
   suggestion: Suggestion | null;
   batch_id: string | null;
   provider_transaction_id: string | null;
+  /** The receipt matched to this transaction (receipt inbox). */
+  receipt_id: string | null;
+  /** Inbox receipts suggested for this transaction, not yet confirmed. */
+  suggested_receipt_ids: string[];
 }
 
 export interface Suggestion {
-  source: "rule" | "history" | "payout";
+  source: "rule" | "history" | "payout" | "receipt";
   account_id?: string | null;
   transfer_account_id?: string | null;
   contact_id?: string | null;
@@ -273,6 +284,8 @@ export interface Suggestion {
   /** A payment provider's payout this deposit matches (`source: "payout"`); linked when accepted. */
   payout_id?: string | null;
   payout_arrival_date?: string | null;
+  /** The receipt this suggestion comes from (`source: "receipt"`, or a rule's memo filled from it). */
+  receipt_id?: string | null;
 }
 
 export function bankTxnView(t: BankTxnRow, entryStatus: string | null = null): BankTxnView {
@@ -292,6 +305,8 @@ export function bankTxnView(t: BankTxnRow, entryStatus: string | null = null): B
     suggestion: t.suggestionJson ? (JSON.parse(t.suggestionJson) as Suggestion) : null,
     batch_id: t.batchId,
     provider_transaction_id: t.providerTransactionId,
+    receipt_id: null,
+    suggested_receipt_ids: [],
   };
 }
 
@@ -305,6 +320,8 @@ export interface BankTxnFilter {
   bankAccountId?: string;
   status?: BankTxnRow["status"][];
   bucket?: TxnBucket[];
+  /** Only transactions with (true) or without (false) a matched or suggested receipt. */
+  has_receipt?: boolean;
   q?: string;
   from?: string;
   to?: string;
@@ -328,6 +345,10 @@ export async function listBankTxns(db: Reader, f: BankTxnFilter) {
   const conds: SQL[] = accountAndSearchConds(t, f);
   if (f.status?.length) conds.push(inArray(t.status, f.status));
   if (f.bucket?.length) conds.push(inArray(bucketSql, f.bucket));
+  if (f.has_receipt !== undefined) {
+    const has = sql`exists (select 1 from receipts x where x.matched_bank_txn_id = ${t.id} or (x.status = 'inbox' and x.suggested_bank_txn_id = ${t.id}))`;
+    conds.push(f.has_receipt ? has : sql`not ${has}`);
+  }
   if (f.from) conds.push(gte(t.date, f.from));
   if (f.to) conds.push(lte(t.date, f.to));
   if (f.cursor) {
@@ -346,7 +367,10 @@ export async function listBankTxns(db: Reader, f: BankTxnFilter) {
   const page = rows.slice(0, limit);
   const last = page[page.length - 1];
   return {
-    data: page.map((r) => bankTxnView(r.t, r.entryStatus)),
+    data: await withReceipts(
+      db,
+      page.map((r) => bankTxnView(r.t, r.entryStatus)),
+    ),
     next_cursor: rows.length > limit && last ? `${last.t.date}|${last.t.id}` : null,
   };
 }
@@ -510,6 +534,9 @@ export async function categorizeTx(
     },
   );
   await linkResult(tx, [t.id], r, { ruleId: opts.ruleId ?? null });
+  // A receipt suggested for this transaction is confirmed, and the matched receipt's file is
+  // linked to the new entry (posted or proposed).
+  await onTxnCategorizedTx(tx, orgId, a, t.id, r.entry.id);
   return r;
 }
 
@@ -685,6 +712,11 @@ export async function excludeTx(tx: OrgTx, orgId: string, a: ActorInfo, txnId: s
     targetType: "bank_transaction",
     targetId: txnId,
   });
+  if (exclude) {
+    // An excluded transaction can't carry a receipt: release it and look for another match.
+    for (const id of await releaseReceiptsForTxnTx(tx, orgId, a, txnId))
+      await matchForReceiptTx(tx, orgId, a, id);
+  }
 }
 
 /**
@@ -780,7 +812,7 @@ export function ruleDef(r: RuleRow): RuleDef {
 }
 
 /** Most recent posted categorization of the same normalized description, as a suggestion. */
-async function historySuggestion(tx: Reader, t: BankTxnRow): Promise<Suggestion | null> {
+export async function historySuggestion(tx: Reader, t: BankTxnRow): Promise<Suggestion | null> {
   const prev = await tx
     .select({
       entryId: org.bankTransactions.matchedEntryId,
@@ -814,9 +846,19 @@ async function historySuggestion(tx: Reader, t: BankTxnRow): Promise<Suggestion 
 /**
  * Apply rules to new transactions (SPEC §7.3). Auto-post rules go through the review policy as the
  * `rule` actor; suggest-only rules become review queue proposals; with no rule, fall back to a
- * history-based suggestion shown in Categorize. Never throws for one bad transaction.
+ * receipt, payout, or history-based suggestion shown in Categorize. Never throws for one bad
+ * transaction.
+ *
+ * Receipts are matched first (forward matching, audited as `auditActor`), so a rule that
+ * categorizes the transaction confirms a suggested receipt and links its file to the entry. A rule
+ * keeps its category; when it has no memo, the receipt's memo fills it.
  */
-export async function applyRulesTx(tx: OrgTx, orgId: string, txnIds: string[]) {
+export async function applyRulesTx(
+  tx: OrgTx,
+  orgId: string,
+  txnIds: string[],
+  auditActor: ActorInfo = SYSTEM_ACTOR,
+) {
   if (!txnIds.length) return { applied: 0, posted: 0, proposed: 0, suggested: 0 };
   const rules = (await tx.select().from(org.rules).where(eq(org.rules.isActive, true)).all()).map((r) => ({
     row: r,
@@ -832,6 +874,7 @@ export async function applyRulesTx(tx: OrgTx, orgId: string, txnIds: string[]) {
   const out = { applied: 0, posted: 0, proposed: 0, suggested: 0 };
   for (const t of txns.sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))) {
     if (t.status !== "new" || t.reviewItemId || t.isPending) continue;
+    const fromReceipt = await matchForTxnTx(tx, orgId, auditActor, t);
     const rule = firstMatchingRule(rules, {
       bankAccountId: t.bankAccountId,
       amount: t.amount,
@@ -839,7 +882,7 @@ export async function applyRulesTx(tx: OrgTx, orgId: string, txnIds: string[]) {
       payee: t.payee,
     });
     if (!rule) {
-      const sug = (await payoutSuggestion(tx, t)) ?? (await historySuggestion(tx, t));
+      const sug = fromReceipt ?? (await payoutSuggestion(tx, t)) ?? (await historySuggestion(tx, t));
       if (sug) {
         await tx
           .update(org.bankTransactions)
@@ -850,14 +893,16 @@ export async function applyRulesTx(tx: OrgTx, orgId: string, txnIds: string[]) {
       continue;
     }
     const act = rule.actions;
+    const memo = act.memo ?? fromReceipt?.memo ?? null;
     const suggestion: Suggestion = {
       source: "rule",
       account_id: act.account_id ?? null,
       transfer_account_id: act.transfer_account_id ?? null,
       contact_id: act.contact_id ?? null,
-      memo: act.memo ?? null,
+      memo,
       rule_id: rule.id,
       rule_name: rule.name,
+      ...(fromReceipt ? { receipt_id: fromReceipt.receipt_id ?? null } : {}),
     };
     await tx
       .update(org.bankTransactions)
@@ -899,7 +944,7 @@ export async function applyRulesTx(tx: OrgTx, orgId: string, txnIds: string[]) {
           t.id,
           {
             splits: [{ account_id: act.account_id!, amount: Math.abs(t.amount) }],
-            memo: act.memo ?? null,
+            memo,
             contact_id: act.contact_id ?? null,
             rationale: `Rule: ${rule.name}`,
           },

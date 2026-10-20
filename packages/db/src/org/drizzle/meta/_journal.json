@@ -71,6 +71,13 @@
       "when": 1790770343774,
       "tag": "0009_chain_anchors",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792511021126,
+      "tag": "0010_receipts",
+      "breakpoints": true
     }
   ]
 }

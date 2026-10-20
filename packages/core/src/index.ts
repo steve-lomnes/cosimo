@@ -7,6 +7,7 @@ export * from "./import/index.ts";
 export * from "./importers/index.ts";
 export * from "./ledger.ts";
 export * from "./policy.ts";
+export * from "./receipts.ts";
 export * from "./recurrence.ts";
 export * from "./reports.ts";
 export * from "./tsa-roots.ts";

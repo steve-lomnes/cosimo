@@ -48,6 +48,7 @@ import {
   voidInvoiceTx,
   voidPaymentTx,
 } from "../../services/documents.ts";
+import { normalizeUpload } from "../../services/images.ts";
 import { emailInvoice, invoicePdf } from "../../services/invoice-delivery.ts";
 import { payLinker, storePayTokenHashesTx } from "../../services/online-payments.ts";
 import type { BlobStore } from "../../services/storage.ts";
@@ -1018,7 +1019,8 @@ export function documentRoutes() {
       path: "/orgs/{orgId}/attachments",
       tags: ["Attachments"],
       summary: "Upload a file (receipt, bill, logo), optionally linked to a record",
-      description: "multipart/form-data with `file`, and optional `target_type` and `target_id`. Max 20 MB.",
+      description:
+        "multipart/form-data with `file`, and optional `target_type` and `target_id`. Max 20 MB. A HEIC photo is converted to JPEG.",
       security: bearerSecurity,
       request: {
         params: OrgParams,
@@ -1047,11 +1049,15 @@ export function documentRoutes() {
       if (tt && !(ATTACHMENT_TARGETS as readonly string[]).includes(tt))
         throw badRequest("Unknown target_type.");
       const store = c.get("ctx").services.storage as BlobStore;
-      const blob = await storeBlob(store, o.id, {
-        filename: file.name,
-        type: file.type,
-        bytes: new Uint8Array(await file.arrayBuffer()),
-      });
+      const blob = await storeBlob(
+        store,
+        o.id,
+        await normalizeUpload({
+          filename: file.name,
+          type: file.type,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        }),
+      );
       const row = await o.handle.write((tx) =>
         recordAttachmentTx(
           tx,

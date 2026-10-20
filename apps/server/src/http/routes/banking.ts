@@ -22,6 +22,7 @@ import {
   updateBankAccountTx,
 } from "../../services/banking.ts";
 import { commitImportTx, MAX_IMPORT_BYTES, previewImport } from "../../services/imports.ts";
+import { withReceipts } from "../../services/receipts.ts";
 import {
   completeReconTx,
   discardReconTx,
@@ -93,7 +94,7 @@ const BankTxnCountsSchema = z
 
 const SuggestionSchema = z
   .object({
-    source: z.enum(["rule", "history", "payout"]),
+    source: z.enum(["rule", "history", "payout", "receipt"]),
     account_id: z.string().nullable().optional(),
     transfer_account_id: z.string().nullable().optional(),
     contact_id: z.string().nullable().optional(),
@@ -108,6 +109,11 @@ const SuggestionSchema = z
         "A Stripe payout this deposit matches; accepting the transfer from the clearing account links it.",
       ),
     payout_arrival_date: z.string().nullable().optional(),
+    receipt_id: z
+      .string()
+      .nullable()
+      .optional()
+      .describe("The receipt this suggestion comes from; categorizing the transaction confirms the match."),
   })
   .openapi("Suggestion");
 
@@ -128,6 +134,10 @@ export const BankTxnSchema = z
     suggestion: SuggestionSchema.nullable(),
     batch_id: z.string().nullable(),
     provider_transaction_id: z.string().nullable(),
+    receipt_id: z.string().nullable().openapi({ description: "The receipt matched to this transaction" }),
+    suggested_receipt_ids: z
+      .array(z.string())
+      .openapi({ description: "Inbox receipts suggested for this transaction, not yet confirmed" }),
   })
   .openapi("BankTransaction");
 
@@ -305,8 +315,9 @@ export function bankingRoutes() {
   ) => {
     const t = await mustGetBankTxn(db, txnId);
     const v = res ? submitView(res) : null;
+    const [view] = await withReceipts(db, [bankTxnView(t, v?.entry.status ?? null)]);
     return {
-      transaction: bankTxnView(t, v?.entry.status ?? null),
+      transaction: view!,
       entry: v?.entry ?? null,
       status: v?.status ?? t.status,
       review: v?.review ?? null,
@@ -403,6 +414,9 @@ export function bankingRoutes() {
             .optional()
             .openapi({ description: "Comma-separated: to_categorize, pending, categorized, excluded" }),
           q: z.string().max(200).optional(),
+          has_receipt: z.enum(["true", "false"]).optional().openapi({
+            description: "Only transactions with (true) or without (false) a matched or suggested receipt",
+          }),
           from: IsoDate.optional(),
           to: IsoDate.optional(),
           limit: z.coerce.number().int().min(1).max(500).optional(),
@@ -431,6 +445,7 @@ export function bankingRoutes() {
           bankAccountId: q.bank_account_id,
           status,
           bucket,
+          has_receipt: q.has_receipt === undefined ? undefined : q.has_receipt === "true",
           q: q.q,
           from: q.from,
           to: q.to,
@@ -475,8 +490,10 @@ export function bankingRoutes() {
       responses: { 200: json(BankTxnSchema), ...errorResponses },
     }),
     async (c) => {
-      const t = await mustGetBankTxn(c.get("org").handle.db, c.req.valid("param").txnId);
-      return c.json(bankTxnView(t), 200);
+      const db = c.get("org").handle.db;
+      const t = await mustGetBankTxn(db, c.req.valid("param").txnId);
+      const [view] = await withReceipts(db, [bankTxnView(t)]);
+      return c.json(view!, 200);
     },
   );
 

@@ -32,6 +32,7 @@ import {
   REAUTH_CODES,
   type SyncPage,
 } from "./plaid-client.ts";
+import { matchForReceiptTx, releaseReceiptsForTxnTx, withReceipts } from "./receipts.ts";
 import type { OrgHandle } from "./types.ts";
 
 type Reader = OrgDb | OrgTx;
@@ -642,6 +643,9 @@ async function runSync(
     };
 
     // Removals first: a pending row replaced by its posted version is removed in the same sync.
+    // A deleted row's receipts go back to the inbox first, and are matched again after the rules
+    // run (which match the rows this sync adds).
+    const released: string[] = [];
     const removedIds = removed.map((r) => r.transaction_id);
     const acctIds = accts.map((x) => x.id);
     if (removedIds.length && acctIds.length) {
@@ -657,6 +661,7 @@ async function runSync(
         .all();
       for (const r of rows) {
         if ((r.status === "new" || r.status === "excluded") && !r.reviewItemId && !r.matchedEntryId) {
+          released.push(...(await releaseReceiptsForTxnTx(tx, orgId, systemActor(opts.userId), r.id)));
           await tx.delete(org.bankTransactions).where(eq(org.bankTransactions.id, r.id));
           summary.removed++;
         } else {
@@ -763,7 +768,8 @@ async function runSync(
     }
 
     summary.transfers_paired = await pairImportedTransfersTx(tx, orgId, newIds);
-    summary.rules_applied = (await applyRulesTx(tx, orgId, newIds)).applied;
+    summary.rules_applied = (await applyRulesTx(tx, orgId, newIds, systemActor(opts.userId))).applied;
+    for (const id of new Set(released)) await matchForReceiptTx(tx, orgId, systemActor(opts.userId), id);
 
     const now = new Date().toISOString();
     await tx
@@ -1071,7 +1077,11 @@ async function txnsById(db: Reader, ids: string[]): Promise<BankTxnView[]> {
     .leftJoin(org.journalEntries, eq(org.journalEntries.id, org.bankTransactions.matchedEntryId))
     .where(inArray(org.bankTransactions.id, ids))
     .all();
-  const byId = new Map(rows.map((r) => [r.t.id, bankTxnView(r.t, r.entryStatus)]));
+  const views = await withReceipts(
+    db,
+    rows.map((r) => bankTxnView(r.t, r.entryStatus)),
+  );
+  const byId = new Map(views.map((v) => [v.id, v]));
   return ids.map((id) => byId.get(id)).filter((x): x is BankTxnView => Boolean(x));
 }
 

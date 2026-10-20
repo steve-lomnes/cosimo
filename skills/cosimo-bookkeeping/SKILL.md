@@ -80,6 +80,43 @@ To change a proposal that is still pending, withdraw it with `withdraw_proposal`
 then propose the corrected one. Only withdraw proposals you made; never withdraw someone else's, and
 tell the person if one of theirs is wrong.
 
+## Receipts
+
+Cosimo has a receipt inbox: a receipt captured when someone pays waits there until the card charge
+reaches the bank feed, then is matched to it, and its account and memo become the transaction's
+suggestion on Categorize. Receipts apply directly (no review queue, but audited); categorizing the
+matched transaction still goes through review. You can't forward a photo from the chat to Cosimo,
+so there are two ways to work:
+
+- **(a) The person snaps it in Cosimo first** (recommended). When they ask you to "fill in my
+  receipts", call `list_receipts`, then `get_receipt` for each: it shows you the image (a JPEG,
+  even when the photo was HEIC). Read it and call `update_receipt` with what it says: `merchant`,
+  `date`, `time`, `amount`, `pre_tip_amount`, `tax_amount`, `tip_amount`, and the expense
+  `account`. Ask the person for the business purpose and attendees of a meal if they aren't written
+  on it.
+- **(b) The person shares the photo with you in chat.** Read it, call `create_receipt` with the
+  fields, and give the person the `attach_url` from the result, so they can tap it and add the
+  same photo in Cosimo (a receipt without its image is weak evidence).
+
+Fields:
+
+- `amount` is what the card is **charged**, tip included: the receipt's total plus any tip written
+  in. For a meal where the tip is added after signing, also give `pre_tip_amount` (subtotal plus
+  tax), so a charge with a different tip still matches.
+- `bank_account_id` ("paid with") is the card or account it was paid from, when you know it.
+
+Then:
+
+- `get_receipt` lists `candidates`: transactions that could be the receipt. If the right one is
+  there and the receipt isn't matched yet, call `match_receipt`. If a match is wrong, call
+  `unmatch_receipt` ("not this receipt"); that transaction won't be suggested for it again.
+- Categorizing a transaction with a suggested receipt confirms the match. When the suggestion comes
+  from a receipt (`suggestion.source` is `receipt`), use its account unless the profile says
+  otherwise.
+- A personal purchase or a duplicate can be taken out with `dismiss_receipt` (give the reason). A
+  receipt paid in cash or from a personal card never meets a bank transaction: tell the person to
+  book it from the receipt's page in Cosimo.
+
 ## Invoice follow-up
 
 1. `list_invoices` with `overdue: true`. Sort by days overdue and balance due.

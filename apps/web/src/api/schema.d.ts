@@ -6725,6 +6725,8 @@ export interface paths {
                     /** @description Comma-separated: to_categorize, pending, categorized, excluded */
                     bucket?: string;
                     q?: string;
+                    /** @description Only transactions with (true) or without (false) a matched or suggested receipt */
+                    has_receipt?: "true" | "false";
                     from?: string;
                     to?: string;
                     limit?: number;
@@ -10501,6 +10503,1302 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{orgId}/receipts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List receipts, newest first */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Comma-separated: inbox, matched, booked, dismissed */
+                    status?: string;
+                    limit?: number;
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: components["schemas"]["Receipt"][];
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Capture a receipt (photo, details, or both)
+         * @description JSON with the receipt's fields, or multipart/form-data with an optional `file` (max 20 MB; a HEIC photo is converted to JPEG) and the same fields as strings. A file or an amount is required. The receipt is matched to its bank transaction now if that is already here, else when the feed brings it.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        merchant?: string | null;
+                        /**
+                         * Format: date
+                         * @description Defaults to today
+                         * @example 2026-01-31
+                         */
+                        receipt_date?: string | null;
+                        receipt_time?: string | null;
+                        /**
+                         * @description What the card is charged, tip included
+                         * @example 12345
+                         */
+                        amount?: number | null;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        pre_tip_amount?: number | null;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        tax_amount?: number | null;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        tip_amount?: number | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        bank_account_id?: string | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        account_id?: string | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        contact_id?: string | null;
+                        memo?: string | null;
+                        business_purpose?: string | null;
+                        attendees?: string | null;
+                        location?: string | null;
+                    };
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        file?: string;
+                        merchant?: string;
+                        receipt_date?: string;
+                        receipt_time?: string;
+                        amount?: string;
+                        pre_tip_amount?: string;
+                        tax_amount?: string;
+                        tip_amount?: string;
+                        bank_account_id?: string;
+                        account_id?: string;
+                        contact_id?: string;
+                        memo?: string;
+                        business_purpose?: string;
+                        attendees?: string;
+                        location?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a receipt */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Edit a receipt's details
+         * @description Changing the amount, pre-tip amount, date, merchant, or bank account of a receipt in the inbox matches it again.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        merchant?: string | null;
+                        /**
+                         * Format: date
+                         * @description Defaults to today
+                         * @example 2026-01-31
+                         */
+                        receipt_date?: string | null;
+                        receipt_time?: string | null;
+                        /**
+                         * @description What the card is charged, tip included
+                         * @example 12345
+                         */
+                        amount?: number | null;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        pre_tip_amount?: number | null;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        tax_amount?: number | null;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        tip_amount?: number | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        bank_account_id?: string | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        account_id?: string | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        contact_id?: string | null;
+                        memo?: string | null;
+                        business_purpose?: string | null;
+                        attendees?: string | null;
+                        location?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Attach or replace the receipt's photo or PDF
+         * @description multipart/form-data with `file` (max 20 MB; a HEIC photo is converted to JPEG). Every link the old file had moves to the new one.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        file?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bank transactions that could be this receipt, best first
+         * @description Posted outflows from a day before the receipt's date to a week after, for the amount charged, or for the pre-tip amount plus up to 35% when the merchant matches. Transactions marked as not this receipt are included and flagged.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: components["schemas"]["ReceiptCandidate"][];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/match": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Match a receipt to a bank transaction
+         * @description Links the receipt's file to the transaction (and its entry, if it has one). Picking the suggested transaction confirms the suggestion.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        bank_transaction_id: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/unmatch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Not this receipt: undo a match or turn down a suggestion
+         * @description The transaction is remembered as not this receipt and isn't matched or suggested again. The receipt goes back to the inbox.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dismiss a receipt from the inbox (for example a personal purchase) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        reason?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bring a dismissed receipt back to the inbox */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/book": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Book a receipt with no bank transaction, as a draft bill or an entry
+         * @description `as: bill` creates a draft bill (vendor from `vendor_id`, else the receipt's contact) with one line on the receipt's account, to finalize on the bill page. `as: entry` debits the receipt's account and credits `credit_account_id` (for example owner's equity for a personal card), through the review policy. Both need the receipt's amount and account.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        as: "bill";
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        vendor_id?: string | null;
+                    } | {
+                        /** @enum {string} */
+                        as: "entry";
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        credit_account_id: string;
+                        rationale?: string | null;
+                        lock_override_note?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            receipt: components["schemas"]["Receipt"];
+                            target: {
+                                /** @enum {string} */
+                                type: "bill" | "journal_entry";
+                                id: string;
+                            };
+                            entry: components["schemas"]["JournalEntry"] & (Record<string, never> | null);
+                            status: string | null;
+                            review: {
+                                review_item_id: string | null;
+                                reason: string;
+                            } | null;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{orgId}/contacts": {
         parameters: {
             query?: never;
@@ -13677,7 +14975,7 @@ export interface paths {
         put?: never;
         /**
          * Upload a file (receipt, bill, logo), optionally linked to a record
-         * @description multipart/form-data with `file`, and optional `target_type` and `target_id`. Max 20 MB.
+         * @description multipart/form-data with `file`, and optional `target_type` and `target_id`. Max 20 MB. A HEIC photo is converted to JPEG.
          */
         post: {
             parameters: {
@@ -13697,7 +14995,7 @@ export interface paths {
                         /** Format: binary */
                         file?: string;
                         /** @enum {string} */
-                        target_type?: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings";
+                        target_type?: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings" | "receipt";
                         target_id?: string;
                     };
                 };
@@ -13912,7 +15210,7 @@ export interface paths {
                 content: {
                     "application/json": {
                         /** @enum {string} */
-                        target_type: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings";
+                        target_type: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings" | "receipt";
                         /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                         target_id: string;
                         unlink?: boolean;
@@ -19732,7 +21030,7 @@ export interface paths {
         };
         /**
          * Dashboard summary (viewer or higher)
-         * @description Cash across bank accounts (credit cards listed separately as liabilities), income and expense for the current month and fiscal year to date on the org's default basis, pending review items, bank transactions to categorize (not counting rows still pending at the bank or already waiting in the review queue, which are reported separately in bank_pending), overdue invoices (top 5 by balance), bills overdue or due within 7 days, and bank connections that are not active. Amounts are integer cents.
+         * @description Cash across bank accounts (credit cards listed separately as liabilities), income and expense for the current month and fiscal year to date on the org's default basis, pending review items, bank transactions to categorize (not counting rows still pending at the bank or already waiting in the review queue, which are reported separately in bank_pending), receipts left in the inbox for more than 30 days (stale_receipts), overdue invoices (top 5 by balance), bills overdue or due within 7 days, and bank connections that are not active. Amounts are integer cents.
          */
         get: {
             parameters: {
@@ -20376,10 +21674,14 @@ export interface components {
             suggestion: components["schemas"]["Suggestion"];
             batch_id: string | null;
             provider_transaction_id: string | null;
+            /** @description The receipt matched to this transaction */
+            receipt_id: string | null;
+            /** @description Inbox receipts suggested for this transaction, not yet confirmed */
+            suggested_receipt_ids: string[];
         };
         Suggestion: {
             /** @enum {string} */
-            source: "rule" | "history" | "payout";
+            source: "rule" | "history" | "payout" | "receipt";
             account_id?: string | null;
             transfer_account_id?: string | null;
             contact_id?: string | null;
@@ -20389,6 +21691,8 @@ export interface components {
             /** @description A Stripe payout this deposit matches; accepting the transfer from the clearing account links it. */
             payout_id?: string | null;
             payout_arrival_date?: string | null;
+            /** @description The receipt this suggestion comes from; categorizing the transaction confirms the match. */
+            receipt_id?: string | null;
         } | null;
         BankTxnCounts: {
             all: number;
@@ -20589,6 +21893,93 @@ export interface components {
             created_at: string;
             completed_at: string | null;
             undone_at: string | null;
+        };
+        Receipt: {
+            id: string;
+            /** @enum {string} */
+            status: "inbox" | "matched" | "booked" | "dismissed";
+            merchant: string | null;
+            receipt_date: string;
+            receipt_time: string | null;
+            /**
+             * @description What the card is charged, tip included
+             * @example 12345
+             */
+            amount: number | null;
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            pre_tip_amount: number | null;
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            tax_amount: number | null;
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            tip_amount: number | null;
+            /** @description Paid with */
+            bank_account_id: string | null;
+            account_id: string | null;
+            contact_id: string | null;
+            memo: string | null;
+            business_purpose: string | null;
+            attendees: string | null;
+            location: string | null;
+            /** @enum {string} */
+            extraction_source: "manual" | "assistant";
+            attachment: {
+                id: string;
+                filename: string;
+                mime_type: string;
+                size_bytes: number;
+                download_url: string;
+            } | null;
+            matched_bank_txn_id: string | null;
+            /** @enum {string|null} */
+            match_method: "auto" | "manual" | "confirmed" | null;
+            matched_at: string | null;
+            suggested_bank_txn_id: string | null;
+            transaction: components["schemas"]["ReceiptTransaction"];
+            rejected_txn_ids: string[];
+            /** @enum {string|null} */
+            booked_target_type: "bill" | "journal_entry" | null;
+            booked_target_id: string | null;
+            dismissed_reason: string | null;
+            /** @description In the inbox for more than 30 days */
+            stale: boolean;
+            created_by_actor: string;
+            created_at: string;
+            updated_at: string;
+        };
+        /** @description The matched transaction, else the suggested one */
+        ReceiptTransaction: {
+            id: string;
+            bank_account_id: string;
+            date: string;
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            amount: number;
+            description: string;
+            payee: string | null;
+            /** @enum {string} */
+            status: "new" | "categorized" | "matched" | "excluded";
+            entry_id: string | null;
+        } | null;
+        ReceiptCandidate: {
+            transaction: components["schemas"]["ReceiptTransaction"];
+            /** @enum {string} */
+            fit: "exact" | "tip";
+            merchant_match: boolean;
+            days_apart: number;
+            /** @description Marked as not this receipt before */
+            rejected: boolean;
+            suggested: boolean;
         };
         Contact: {
             id: string;
@@ -21508,6 +22899,9 @@ export interface components {
                  * @example 12345
                  */
                 total: number;
+            };
+            stale_receipts: {
+                count: number;
             };
             overdue_invoices: {
                 count: number;

@@ -17,21 +17,23 @@ export function takePendingReceiptFile(): File | null {
   return f;
 }
 
-const PAID_WITH_KEY = "cosimo.receipt.paidWith";
-
-/** The bank account used for the last receipt. Storage can be blocked, so every access is guarded. */
-export function readPaidWith(): string {
-  try {
-    return localStorage.getItem(PAID_WITH_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-export function writePaidWith(id: string) {
-  try {
-    if (id) localStorage.setItem(PAID_WITH_KEY, id);
-    else localStorage.removeItem(PAID_WITH_KEY);
-  } catch {}
+/**
+ * The bank account the most recent receipt was paid with, for the capture form's default. Taken from
+ * the server rather than browser storage, so it follows the person across devices.
+ */
+export function useLastPaidWith(orgId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["receipts", orgId, "last-paid-with"],
+    enabled,
+    queryFn: async () => {
+      const r = await unwrap(
+        api.GET("/api/v1/orgs/{orgId}/receipts", {
+          params: { path: { orgId }, query: { status: "inbox,matched,booked,dismissed", limit: 20 } },
+        }),
+      );
+      return r.data.find((x) => x.bank_account_id)?.bank_account_id ?? "";
+    },
+  });
 }
 
 export function useReceipt(orgId: string, id: string | null | undefined) {

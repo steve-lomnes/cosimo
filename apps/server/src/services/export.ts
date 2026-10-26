@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditGenesis, ledgerGenesis } from "@cosimo/core";
-import { connectOrg, migrateOrg, orgMigrations, system } from "@cosimo/db";
+import { connectOrg, migrate, migrateOrg, orgMigrations, system } from "@cosimo/db";
 import { VERSION } from "@cosimo/shared";
 import type { Client, InValue } from "@libsql/client";
 import { eq } from "drizzle-orm";
@@ -247,8 +247,13 @@ export async function importOrgArchive(
   const h = connectOrg(prov.url, prov.authToken);
   const counts: Record<string, number> = {};
   try {
-    // Migrate to the export's schema level; newer migrations run afterwards so their data steps apply.
-    await migrateOrg(h.client);
+    // Migrate to the export's schema level; newer migrations run after the load so their data steps
+    // apply (0011, for one, moves receipts.attachment_id into attachment_links).
+    const level = new Set(manifest.schema);
+    await migrate(
+      h.client,
+      orgMigrations.filter((x) => level.has(x.tag)),
+    );
     const names = (await tableNames(h.client)).filter((t) => files[`tables/${t}.jsonl`] !== undefined);
     const extra = Object.keys(manifest.tables).filter((t) => !names.includes(t));
     if (extra.length) throw unprocessable(`Unknown tables in export: ${extra.join(", ")}`, "invalid_export");
@@ -277,6 +282,7 @@ export async function importOrgArchive(
     }
     for (const t of triggers) stmts.push({ sql: t.sql });
     await h.client.batch(stmts, "write");
+    await migrateOrg(h.client);
 
     const v = await verifyOrg(h.db, orgId);
     if (!v.ok)

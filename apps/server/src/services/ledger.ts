@@ -20,6 +20,7 @@ import type { AccountType, SourceType } from "@cosimo/shared";
 import { and, asc, desc, eq, gte, inArray, like, lte, or, type SQL, sql } from "drizzle-orm";
 import { ApiError, conflict, notFound, unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
+import { linkAttachmentTx } from "./attachments.ts";
 import { appendAudit } from "./audit.ts";
 import { checkpoint, ledgerHead } from "./chain.ts";
 
@@ -690,31 +691,74 @@ export async function reverseEntryTx(
   );
 }
 
-/** "Edit" of a posted entry: reverse it and post a corrected replacement, atomically. */
+/**
+ * "Edit" of a posted entry: reverse it and post a corrected replacement, atomically. The
+ * replacement takes the original's files (`keepAttachments`, on by default; the original keeps its
+ * own links too, so the reversed history still shows its evidence), and receipts booked to the
+ * original point at the replacement.
+ */
 export async function replaceEntryTx(
   tx: OrgTx,
   orgId: string,
   a: ActorInfo,
   entryId: string,
   replacement: EntryInput,
-  opts: SubmitOptions = {},
+  opts: SubmitOptions & { keepAttachments?: boolean } = {},
 ) {
+  const { keepAttachments = true, ...submitOpts } = opts;
   const reversal = await reverseEntryTx(
     tx,
     orgId,
     a,
     entryId,
     { lockOverrideNote: replacement.lockOverrideNote, rationale: replacement.rationale },
-    opts,
+    submitOpts,
   );
   const next = await submitEntryTx(
     tx,
     orgId,
     a,
     { ...replacement, sourceType: replacement.sourceType ?? "manual" },
-    opts,
+    submitOpts,
   );
+  if (keepAttachments) {
+    const links = await tx
+      .select({ id: org.attachmentLinks.attachmentId })
+      .from(org.attachmentLinks)
+      .where(
+        and(eq(org.attachmentLinks.targetType, "journal_entry"), eq(org.attachmentLinks.targetId, entryId)),
+      )
+      .all();
+    for (const l of links)
+      await linkAttachmentTx(tx, orgId, a, l.id, { type: "journal_entry", id: next.entry.id });
+  }
+  await repointReceiptsTx(tx, orgId, a, entryId, next.entry.id);
   return { reversal, replacement: next };
+}
+
+/**
+ * Receipts booked to a replaced entry now point at its replacement. Done here rather than in
+ * receipts.ts, which imports this module.
+ */
+async function repointReceiptsTx(tx: OrgTx, orgId: string, a: ActorInfo, fromId: string, toId: string) {
+  const rows = await tx
+    .select({ id: org.receipts.id })
+    .from(org.receipts)
+    .where(and(eq(org.receipts.bookedTargetType, "journal_entry"), eq(org.receipts.bookedTargetId, fromId)))
+    .all();
+  for (const r of rows) {
+    await tx
+      .update(org.receipts)
+      .set({ bookedTargetId: toId, updatedAt: new Date().toISOString() })
+      .where(eq(org.receipts.id, r.id));
+    await appendAudit(tx, orgId, a, {
+      action: "receipt.update",
+      targetType: "receipt",
+      targetId: r.id,
+      before: { booked_target_id: fromId },
+      after: { booked_target_id: toId, reason: "entry_replaced" },
+    });
+  }
 }
 
 // ----------------------------------------------------------------------------- lock dates

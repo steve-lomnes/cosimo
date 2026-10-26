@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
 import { api, rawFetch, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
 import { SearchSelect } from "../components/SearchSelect";
@@ -14,6 +14,7 @@ import {
   Empty,
   ErrorText,
   Field,
+  FilterPills,
   Input,
   Loading,
   PageHeader,
@@ -27,7 +28,9 @@ import { centsToDecimal, fmtDate, money, todayIso, tryParseCents } from "../lib/
 import { useAccounts } from "../lib/ledger";
 import { useOrgId, useRole } from "../lib/org";
 import {
+  dueToAccountId,
   type Receipt,
+  type ReceiptFile,
   takePendingReceiptFile,
   useInvalidateReceipts,
   useLastPaidWith,
@@ -45,17 +48,33 @@ const TABS: { value: Tab; label: string }[] = [
 
 // ----------------------------------------------------------------------------- list
 
+/** `?no_bank_account=true`: only receipts with no bank account (the dashboard's "to book" link). */
+export const validateReceiptsSearch = (s: Record<string, unknown>) => ({
+  no_bank_account: s.no_bank_account === true || s.no_bank_account === "true" ? true : undefined,
+});
+
 export function ReceiptsPage() {
   const orgId = useOrgId();
   const { canWrite } = useRole();
+  const navigate = useNavigate();
+  const search = useSearch({ strict: false }) as { no_bank_account?: boolean };
+  const noBank = Boolean(search.no_bank_account);
   const [tab, setTab] = useState<Tab>("inbox");
   const list = useInfiniteQuery({
-    queryKey: ["receipts", orgId, "list", tab],
+    queryKey: ["receipts", orgId, "list", tab, noBank],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam }) =>
       unwrap(
         api.GET("/api/v1/orgs/{orgId}/receipts", {
-          params: { path: { orgId }, query: { status: tab, limit: 50, cursor: pageParam ?? undefined } },
+          params: {
+            path: { orgId },
+            query: {
+              status: tab,
+              no_bank_account: noBank ? "true" : undefined,
+              limit: 50,
+              cursor: pageParam ?? undefined,
+            },
+          },
         }),
       ),
     getNextPageParam: (l) => l.next_cursor,
@@ -78,12 +97,31 @@ export function ReceiptsPage() {
         }
       />
       <Tabs value={tab} onChange={setTab} tabs={TABS} />
+      <div className="mb-3">
+        <FilterPills
+          value={noBank ? "personal" : "all"}
+          onChange={(v) =>
+            navigate({
+              to: "/o/$orgId/expenses/receipts",
+              params: { orgId },
+              search: { no_bank_account: v === "personal" || undefined },
+            } as never)
+          }
+          options={[
+            { value: "all", label: "All" },
+            { value: "personal", label: "Paid personally or in cash" },
+          ]}
+        />
+      </div>
       <ErrorText error={list.error} />
       {list.isLoading ? (
         <Loading />
       ) : rows.length === 0 ? (
         <Empty title={tab === "inbox" ? "No receipts waiting." : "Nothing here."}>
-          {tab === "inbox" && "Receipts you snap show up here until they match a bank transaction."}
+          {tab === "inbox" &&
+            (noBank
+              ? "Receipts paid personally or in cash wait here until you book them."
+              : "Receipts you snap show up here until they match a bank transaction.")}
         </Empty>
       ) : (
         <ul className="divide-y divide-zinc-100 overflow-hidden rounded-lg bg-white ring-1 ring-zinc-200 dark:divide-zinc-800 dark:bg-zinc-900 dark:ring-zinc-800">
@@ -161,7 +199,11 @@ function MatchState({ r }: { r: Receipt }) {
     );
   return (
     <span>
-      <Badge tone="zinc">Waiting for bank</Badge>
+      {r.bank_account_id || !r.paid_with_note ? (
+        <Badge tone="zinc">Waiting for bank</Badge>
+      ) : (
+        <Badge tone="amber">Paid with {r.paid_with_note}: book it</Badge>
+      )}
       {r.stale && <span className="ml-1 text-amber-700 dark:text-amber-400">Over 30 days</span>}
     </span>
   );
@@ -364,9 +406,13 @@ function BookPanel({ r }: { r: Receipt }) {
   const navigate = useNavigate();
   const invalidate = useInvalidateReceipts();
   const accounts = useAccounts(orgId);
-  const [as, setAs] = useState<"bill" | "entry">("bill");
+  // No bank account: likely paid personally, so open on an entry crediting the "Due to …" account.
+  const personal = !r.bank_account_id;
+  const [as, setAs] = useState<"bill" | "entry">(personal ? "entry" : "bill");
   const [vendor, setVendor] = useState(r.contact_id ?? "");
-  const [credit, setCredit] = useState("");
+  const [picked, setPicked] = useState<string | null>(null);
+  const dueTo = useMemo(() => dueToAccountId(accounts.data ?? []), [accounts.data]);
+  const credit = picked ?? (personal ? (dueTo ?? "") : "");
   const ready = r.amount != null && Boolean(r.account_id);
   const book = useMutation({
     mutationFn: () =>
@@ -402,14 +448,21 @@ function BookPanel({ r }: { r: Receipt }) {
       {as === "bill" ? (
         <ContactPicker kind="vendor" value={vendor} onChange={setVendor} />
       ) : (
-        <AccountSelect
-          aria-label="Credit account"
-          accounts={accounts.data ?? []}
-          types={["asset", "liability", "equity"]}
-          value={credit}
-          onChange={setCredit}
-          placeholder="Credit account…"
-        />
+        <>
+          <AccountSelect
+            aria-label="Credit account"
+            accounts={accounts.data ?? []}
+            types={["asset", "liability", "equity"]}
+            value={credit}
+            onChange={setPicked}
+            placeholder="Credit account…"
+          />
+          {credit && credit === dueTo && (
+            <p className="text-xs text-zinc-500">
+              Paid personally: the business now owes the owner this amount.
+            </p>
+          )}
+        </>
       )}
       <ErrorText error={book.error} />
       <Button
@@ -489,6 +542,7 @@ function ReceiptForm({
   const [contact, setContact] = useState(receipt?.contact_id ?? "");
   const [purpose, setPurpose] = useState(receipt?.business_purpose ?? "");
   const [attendees, setAttendees] = useState(receipt?.attendees ?? "");
+  const [paidNote, setPaidNote] = useState(receipt?.paid_with_note ?? "");
   // A remembered bank account may have been removed since.
   const paidOk = !paidWith || (banks.data ?? []).some((b) => b.id === paidWith);
   const bankId = banks.data && !paidOk ? "" : paidWith;
@@ -503,7 +557,7 @@ function ReceiptForm({
         : tip.trim() && tipCents === null
           ? "Enter the tip as dollars."
           : null;
-  const hasFile = Boolean(file || receipt?.attachment);
+  const hasFile = Boolean(file || receipt?.attachments.length);
   const needs = !hasFile && !amount.trim() ? "Add a photo or the amount charged." : null;
 
   const save = useMutation({
@@ -520,6 +574,7 @@ function ReceiptForm({
         contact_id: contact || null,
         business_purpose: purpose.trim() || null,
         attendees: attendees.trim() || null,
+        paid_with_note: paidNote.trim() || null,
       };
       if (receipt)
         return unwrap(
@@ -607,6 +662,13 @@ function ReceiptForm({
             </Select>
           )}
         </Field>
+        {!bankId && (
+          <Field label="Paid with (if not a bank account)" hint="For example a personal card or cash.">
+            {(id) => (
+              <Input id={id} maxLength={200} value={paidNote} onChange={(e) => setPaidNote(e.target.value)} />
+            )}
+          </Field>
+        )}
         <Field label="Account">
           {(id) => (
             <AccountSelect
@@ -738,26 +800,27 @@ export function ReceiptPage() {
     mutationFn: async (f: File) => {
       const form = new FormData();
       form.append("file", f);
-      await rawFetch(`/api/v1/orgs/${orgId}/receipts/${receiptId}/file`, { method: "PUT", body: form });
+      await rawFetch(`/api/v1/orgs/${orgId}/receipts/${receiptId}/files`, { method: "POST", body: form });
     },
+    onSuccess: () => invalidate(orgId),
+  });
+  const remove = useMutation({
+    mutationFn: (attachmentId: string) =>
+      unwrap(
+        api.DELETE("/api/v1/orgs/{orgId}/receipts/{receiptId}/files/{attachmentId}", {
+          params: { path: { orgId, receiptId, attachmentId } },
+        }),
+      ),
     onSuccess: () => invalidate(orgId),
   });
   const r = q.data;
   if (q.isLoading) return <Loading />;
   if (!r) return <ErrorText error={q.error} />;
   const editable = canWrite && r.status !== "booked";
-  let photo: ReactNode = null;
-  if (r.attachment) {
-    photo = r.attachment.mime_type.startsWith("image/") ? (
-      <a href={r.attachment.download_url} target="_blank" rel="noreferrer">
-        <img src={r.attachment.download_url} alt="Receipt" className="max-h-96 rounded-md object-contain" />
-      </a>
-    ) : (
-      <a href={r.attachment.download_url} target="_blank" rel="noreferrer" className="text-sm underline">
-        {r.attachment.filename}
-      </a>
-    );
-  }
+  const files = r.attachments;
+  // Only an inbox or matched receipt loses files; one with no amount keeps its last.
+  const removable =
+    canWrite && (r.status === "inbox" || r.status === "matched") && (files.length > 1 || r.amount != null);
   return (
     <>
       <PageHeader
@@ -775,23 +838,42 @@ export function ReceiptPage() {
         }
       />
       <div className="space-y-4">
-        <Card title="Photo">
+        <Card title={files.length > 1 ? "Files" : "Photo"}>
           <div className="space-y-3">
-            {photo}
-            {!r.attachment && (
+            {files.length > 0 && (
+              <ul className="space-y-3" aria-label="Receipt files">
+                {files.map((f) => (
+                  <li key={f.id} className="space-y-1">
+                    <FileShown f={f} />
+                    {removable && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Remove ${f.filename}`}
+                        loading={remove.isPending && remove.variables === f.id}
+                        onClick={() => remove.mutate(f.id)}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!files.length && (
               <Alert kind="info">
                 This receipt has no photo yet. Add the photo to keep it with the record.
               </Alert>
             )}
             {canWrite && (
               <FilePicker
-                primary={!r.attachment}
-                label={r.attachment ? "Replace photo" : "Add photo"}
+                primary={!files.length}
+                label={files.length ? "Add another file" : "Add photo"}
                 busy={upload.isPending}
                 onFile={(f) => upload.mutate(f)}
               />
             )}
-            <ErrorText error={upload.error} />
+            <ErrorText error={upload.error ?? remove.error} />
           </div>
         </Card>
         <Card title="Status">
@@ -818,12 +900,30 @@ export function ReceiptPage() {
           <Card title="Details">
             <dl className="grid gap-2 text-sm sm:grid-cols-2">
               <Detail label="Business purpose" value={r.business_purpose} />
+              <Detail label="Paid with" value={r.paid_with_note} />
               <Detail label="Attendees" value={r.attendees} />
             </dl>
           </Card>
         )}
       </div>
     </>
+  );
+}
+
+/** One of a receipt's files: an image shown inline, else a link with its name. */
+function FileShown({ f }: { f: ReceiptFile }) {
+  return f.mime_type.startsWith("image/") ? (
+    <a href={f.download_url} target="_blank" rel="noreferrer" className="block">
+      <img
+        src={f.download_url}
+        alt={`Receipt: ${f.filename}`}
+        className="max-h-96 rounded-md object-contain"
+      />
+    </a>
+  ) : (
+    <a href={f.download_url} target="_blank" rel="noreferrer" className="text-sm underline">
+      {f.filename}
+    </a>
   );
 }
 

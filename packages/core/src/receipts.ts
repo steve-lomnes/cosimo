@@ -120,13 +120,22 @@ export function rankCandidates<T extends { id: string; days: number; merchant: b
 
 /**
  * The memo a receipt suggests for its transaction: its own memo, else "Merchant: purpose", else the
- * merchant alone (null when it has none of these).
+ * merchant alone (null when it has none of these). Booking a receipt passes `paid_with_note`, which
+ * is appended as " (paid with …)".
  */
 export function receiptMemo(r: {
   memo?: string | null;
   merchant?: string | null;
   business_purpose?: string | null;
+  paid_with_note?: string | null;
 }): string | null {
+  const paid = r.paid_with_note?.trim();
+  const base = baseMemo(r);
+  if (!paid) return base;
+  return base ? `${base} (paid with ${paid})` : `Paid with ${paid}`;
+}
+
+function baseMemo(r: { memo?: string | null; merchant?: string | null; business_purpose?: string | null }) {
   const memo = r.memo?.trim();
   if (memo) return memo;
   const merchant = r.merchant?.trim();

@@ -14,13 +14,15 @@
  * directly and are recorded in the audit log (rules a sync runs still go through the review policy).
  * Receipts (the receipt inbox) don't touch the books either: creating, filling in, matching, and
  * dismissing one apply directly and are audited, while categorizing the matched transaction still
- * goes through review. get_receipt sends the receipt's image after its JSON (`withContent`).
+ * goes through review. get_receipt sends the receipt's images after its JSON (`withContent`). Booking
+a receipt as an entry or bill goes through review like create_manual_entry and create_bill_draft;
+linking an existing file to a record applies directly and is audited.
  * Recurring templates are proposed too, and nothing runs until a person approves. An assistant may
  * withdraw its own pending proposals, which ends them as rejected. There is no tool to approve,
  * reject, void, delete, or move lock dates.
  */
 import type { LineInput } from "@cosimo/core";
-import { org, system } from "@cosimo/db";
+import { type OrgDb, type OrgTx, org, system } from "@cosimo/db";
 import { ON_DUE_DATE, type Role, TERM_PRESETS } from "@cosimo/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
@@ -28,7 +30,7 @@ import type { AppContext } from "../context.ts";
 import { forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { OrgScope } from "../http/types.ts";
 import { listAccounts } from "./accounts.ts";
-import { mustGetAttachment, storeBlob } from "./attachments.ts";
+import { linkAttachmentTx, listAttachments, mustGetAttachment, storeBlob } from "./attachments.ts";
 import {
   categorizeTx,
   countBankTxns,
@@ -69,9 +71,14 @@ import { payLinker } from "./online-payments.ts";
 import { proposePaymentRedateTx } from "./payment-redate-review.ts";
 import { syncForAssistant } from "./plaid.ts";
 import {
+  assertBookableReceipt,
+  bookReceiptTx,
   createReceiptTx,
   dismissReceiptTx,
+  dueToAccountId,
+  linkReceiptFileTx,
   listReceipts,
+  markReceiptBookedTx,
   matchReceiptTx,
   mustGetReceipt,
   type ReceiptInput,
@@ -315,6 +322,46 @@ function outcome(r: {
     message: reviewId
       ? "Proposed. It is waiting in the review queue for a person to approve; it does not affect the books until then."
       : "Applied: a review policy approved it automatically.",
+  };
+}
+
+const ReceiptIdArg = z
+  .string()
+  .optional()
+  .describe(
+    "A receipt in the inbox (from list_receipts) this records: its files are linked here and it is marked booked.",
+  );
+
+/**
+ * Hold a bill draft for review, or finalize it when a review policy approves it (as approving the
+ * review item would). create_bill_draft and book_receipt share this.
+ */
+async function holdOrFinalizeBillTx(
+  t: ToolCtx,
+  tx: OrgTx,
+  bill: { id: string; billNumber: string | null; total: number },
+  rationale: string,
+) {
+  const reviewId = await holdBillDraftTx(tx, t.scope.id, t.scope.actor, bill.id, rationale);
+  if (reviewId)
+    return {
+      bill_id: bill.id,
+      bill_number: bill.billNumber,
+      total: bill.total,
+      status: "pending_review",
+      review_item_id: reviewId,
+      entry_id: null as string | null,
+      message: "Drafted. It waits in the review queue; nothing is posted until a person approves it.",
+    };
+  const r = await finalizeBillTx(tx, t.scope.id, t.scope.actor, bill.id, { forcePost: true });
+  return {
+    bill_id: bill.id,
+    bill_number: bill.billNumber,
+    total: bill.total,
+    status: "open",
+    review_item_id: null,
+    entry_id: r.entry.id as string | null,
+    message: "Applied: a review policy approved it automatically, so the bill is posted to Accounts Payable.",
   };
 }
 
@@ -1147,27 +1194,35 @@ tool({
   name: "create_manual_entry",
   title: "Propose a journal entry",
   description:
-    "Propose a balanced journal entry (debits positive, credits negative; lines must sum to zero). Use it for adjustments and follow-on entries, such as monthly amortization of a prepaid expense. It goes to the review queue unless a policy approves it. To correct an entry that's already posted, use propose_replacement (or propose_reversal to cancel it) instead of adding an offsetting entry.",
+    "Propose a balanced journal entry (debits positive, credits negative; lines must sum to zero). Use it for adjustments and follow-on entries, such as monthly amortization of a prepaid expense. It goes to the review queue unless a policy approves it. To correct an entry that's already posted, use propose_replacement (or propose_reversal to cancel it) instead of adding an offsetting entry. With receipt_id (a receipt in the inbox), the receipt's files are linked to the entry and the receipt is marked booked to it; for a simple receipt, book_receipt builds the entry for you.",
   write: true,
   money: true,
   input: z.object({
     date: IsoDate,
     memo: z.string().max(500).optional(),
     lines: EntryLines,
+    receipt_id: ReceiptIdArg,
     rationale: Rationale,
   }),
   async run(t, i) {
     requireWriter(t);
     const lines = await entryLines(t, i.lines);
-    const r = await t.scope.handle.write((tx) =>
-      submitEntryTx(tx, t.scope.id, t.scope.actor, {
+    const r = await t.scope.handle.write(async (tx) => {
+      const receipt = i.receipt_id ? await assertBookableReceipt(tx, i.receipt_id) : null;
+      const res = await submitEntryTx(tx, t.scope.id, t.scope.actor, {
         date: i.date,
         memo: i.memo ?? null,
         lines,
         rationale: i.rationale,
-      }),
-    );
-    return outcome(r);
+      });
+      if (receipt)
+        await markReceiptBookedTx(tx, t.scope.id, t.scope.actor, receipt, {
+          type: "journal_entry",
+          id: res.entry.id,
+        });
+      return res;
+    });
+    return { ...outcome(r), receipt_id: i.receipt_id ?? null };
   },
 });
 
@@ -1264,7 +1319,7 @@ tool({
   name: "create_bill_draft",
   title: "Propose a bill draft",
   description:
-    "Draft a bill from a vendor. It is held in the review queue; a person approves it (which finalizes it, posting Accounts Payable). Each line is a description, an amount, and an expense (or asset/liability) account. The vendor must be a contact marked vendor or both, not customer-only. For an invoice to a customer use create_invoice_draft instead.",
+    "Draft a bill from a vendor. It is held in the review queue; a person approves it (which finalizes it, posting Accounts Payable). Each line is a description, an amount, and an expense (or asset/liability) account. The vendor must be a contact marked vendor or both, not customer-only. For an invoice to a customer use create_invoice_draft instead. With receipt_id (a receipt in the inbox), the receipt's files are linked to the bill and the receipt is marked booked to it.",
   write: true,
   money: true,
   input: z.object({
@@ -1282,6 +1337,7 @@ tool({
         }),
       )
       .min(1),
+    receipt_id: ReceiptIdArg,
     rationale: Rationale,
   }),
   async run(t, i) {
@@ -1290,6 +1346,7 @@ tool({
     for (const l of i.lines)
       lines.push({ description: l.description, amount: l.amount, account_id: await accountId(t, l.account) });
     return t.scope.handle.write(async (tx) => {
+      const receipt = i.receipt_id ? await assertBookableReceipt(tx, i.receipt_id) : null;
       const { bill } = await createBillTx(tx, t.scope.id, t.scope.actor, {
         vendor_id: i.vendor_id,
         bill_number: i.bill_number ?? null,
@@ -1299,29 +1356,9 @@ tool({
         lines,
         draft: true,
       });
-      const reviewId = await holdBillDraftTx(tx, t.scope.id, t.scope.actor, bill.id, i.rationale);
-      if (reviewId)
-        return {
-          bill_id: bill.id,
-          bill_number: bill.billNumber,
-          total: bill.total,
-          status: "pending_review",
-          review_item_id: reviewId,
-          entry_id: null,
-          message: "Drafted. It waits in the review queue; nothing is posted until a person approves it.",
-        };
-      // A review policy approved it: finalize now, as approving the review item would.
-      const r = await finalizeBillTx(tx, t.scope.id, t.scope.actor, bill.id, { forcePost: true });
-      return {
-        bill_id: bill.id,
-        bill_number: bill.billNumber,
-        total: bill.total,
-        status: "open",
-        review_item_id: null,
-        entry_id: r.entry.id,
-        message:
-          "Applied: a review policy approved it automatically, so the bill is posted to Accounts Payable.",
-      };
+      if (receipt)
+        await markReceiptBookedTx(tx, t.scope.id, t.scope.actor, receipt, { type: "bill", id: bill.id });
+      return { ...(await holdOrFinalizeBillTx(t, tx, bill, i.rationale)), receipt_id: i.receipt_id ?? null };
     });
   },
 });
@@ -1454,6 +1491,14 @@ const ReceiptFields = {
   business_purpose: z.string().max(1000).nullable().optional().describe("Why it was a business expense"),
   attendees: z.string().max(1000).nullable().optional().describe("Who else was there, for meals"),
   location: z.string().max(200).nullable().optional().describe("City and state, or address"),
+  paid_with_note: z
+    .string()
+    .max(200)
+    .nullable()
+    .optional()
+    .describe(
+      'How it was paid when not from one of the org\'s bank accounts, such as "Steve\'s personal Amex" or "cash". Added to the booked entry\'s memo.',
+    ),
 };
 
 type ReceiptToolFields = {
@@ -1476,6 +1521,7 @@ async function receiptInput(t: ToolCtx, i: ReceiptToolFields): Promise<ReceiptIn
     ["business_purpose", "business_purpose"],
     ["attendees", "attendees"],
     ["location", "location"],
+    ["paid_with_note", "paid_with_note"],
   ];
   for (const [from, to] of map) if (i[from] !== undefined) (out as Record<string, unknown>)[to] = i[from];
   if (i.account !== undefined) out.account_id = i.account === null ? null : await accountId(t, i.account);
@@ -1488,6 +1534,8 @@ function receiptOut(t: ToolCtx, r: ReceiptView) {
 
 /** The largest file `create_receipt` accepts as base64, decoded. */
 export const MCP_RECEIPT_MAX_BYTES = 10 * 1024 * 1024;
+/** How many of a receipt's files `get_receipt` sends. */
+const MCP_RECEIPT_MAX_FILES = 4;
 
 tool({
   name: "list_receipts",
@@ -1499,12 +1547,19 @@ tool({
       .array(z.enum(["inbox", "matched", "booked", "dismissed"]))
       .default(["inbox"])
       .describe("Which receipts; default the inbox"),
+    no_bank_account: z
+      .boolean()
+      .optional()
+      .describe(
+        "Only receipts with no bank account (paid personally or in cash): these wait for book_receipt",
+      ),
     limit: z.number().int().min(1).max(200).default(50),
     cursor: z.string().optional(),
   }),
   async run(t, i) {
     return listReceipts(t.scope.handle.db, t.scope.id, {
       status: i.status,
+      noBankAccount: i.no_bank_account,
       limit: i.limit,
       cursor: i.cursor,
     });
@@ -1514,7 +1569,7 @@ tool({
 tool({
   name: "get_receipt",
   title: "Read a receipt and its image",
-  description: `One receipt with its fields, the bank transactions that could be it (\`candidates\`, best first), and \`attach_url\` (the receipt's page in Cosimo, where the person can add or replace the photo). The receipt's image follows the JSON as image content (a JPEG, up to 1568 px on the long edge); a PDF follows as an embedded resource. Read it to fill in the fields with update_receipt. ${RECEIPT_FLOWS}`,
+  description: `One receipt with its fields, the bank transactions that could be it (\`candidates\`, best first), and \`attach_url\` (the receipt's page in Cosimo, where the person can add more files or replace one). Each of its files (\`attachments\`, oldest first, up to ${MCP_RECEIPT_MAX_FILES}) follows the JSON: an image as image content (a JPEG, up to 1568 px on the long edge), a PDF as an embedded resource. Read it to fill in the fields with update_receipt. ${RECEIPT_FLOWS}`,
   money: true,
   input: z.object({ receipt_id: z.string() }),
   async run(t, i) {
@@ -1526,15 +1581,17 @@ tool({
       candidates: await receiptCandidates(db, r.id),
     };
     const extra: McpContent[] = [];
-    const att = r.attachmentId ? await mustGetAttachment(db, r.attachmentId) : null;
-    if (att) {
+    const notes: string[] = [];
+    const base = t.ctx.config.server.public_url.replace(/\/$/, "");
+    for (const f of view.attachments.slice(0, MCP_RECEIPT_MAX_FILES)) {
+      const att = await mustGetAttachment(db, f.id);
       const bytes = await (t.ctx.services.storage as BlobStore).get(att.storageKey);
-      if (!bytes) out.image_note = "The receipt's file is missing from storage.";
+      if (!bytes) notes.push(`The file ${f.filename} is missing from storage.`);
       else if (att.mimeType === "application/pdf") {
         extra.push({
           type: "resource",
           resource: {
-            uri: `${t.ctx.config.server.public_url.replace(/\/$/, "")}${view.attachment!.download_url}`,
+            uri: `${base}${f.download_url}`,
             mimeType: "application/pdf",
             blob: Buffer.from(bytes).toString("base64"),
           },
@@ -1548,10 +1605,18 @@ tool({
             mimeType: img.mimeType,
           });
         else
-          out.image_note =
-            "This file can't be shown to you (an unsupported or very large image). Ask the person for the receipt's details, or to replace the file with a JPEG at attach_url.";
+          notes.push(
+            `The file ${f.filename} can't be shown to you (an unsupported or very large image). Ask the person for the receipt's details, or to replace the file with a JPEG at attach_url.`,
+          );
       }
-    } else out.image_note = "No file is attached to this receipt yet; the person can add one at attach_url.";
+    }
+    if (!view.attachments.length)
+      notes.push("No file is attached to this receipt yet; the person can add one at attach_url.");
+    else if (view.attachments.length > MCP_RECEIPT_MAX_FILES)
+      notes.push(
+        `Only the first ${MCP_RECEIPT_MAX_FILES} of its ${view.attachments.length} files are shown; the person can see them all at attach_url.`,
+      );
+    if (notes.length) out.image_note = notes.join(" ");
     return withContent(out, extra);
   },
 });
@@ -1673,6 +1738,128 @@ tool({
 });
 
 tool({
+  name: "book_receipt",
+  title: "Book a receipt that has no bank transaction",
+  description: `Book a receipt that will never meet a bank transaction, typically one paid on a personal card or in cash. Set the receipt's account (the expense) and amount with update_receipt first: booking uses them, with the merchant, purpose, and paid_with_note for the memo. \`as: "entry"\` debits the receipt's account and credits credit_account; credit_account defaults to the org's "Due to …" liability (what the business owes the owner who paid), so check the org profile and notes in case another account is used. \`as: "bill"\` drafts a bill from the vendor (vendor_id, else the receipt's contact). Either way the receipt's files are linked to the new entry or bill, and it goes to the review queue unless a policy approves it. A receipt matched to a bank transaction is refused: categorize that transaction instead.`,
+  write: true,
+  money: true,
+  input: z.object({
+    receipt_id: z.string(),
+    as: z.enum(["entry", "bill"]),
+    credit_account: z
+      .string()
+      .optional()
+      .describe('For as "entry": the account to credit, ID or code. Defaults to the "Due to …" liability.'),
+    vendor_id: z
+      .string()
+      .optional()
+      .describe('For as "bill": the vendor; defaults to the receipt\'s contact'),
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const db = t.scope.handle.db;
+    if (i.as === "bill") {
+      const out = await t.scope.handle.write(async (tx) => {
+        const r = await bookReceiptTx(tx, t.scope.id, t.scope.actor, i.receipt_id, {
+          as: "bill",
+          vendor_id: i.vendor_id ?? null,
+          rationale: i.rationale,
+        });
+        const bill = (await tx.select().from(org.bills).where(eq(org.bills.id, r.target.id)).get())!;
+        return holdOrFinalizeBillTx(t, tx, bill, i.rationale);
+      });
+      const view = await receiptView(db, t.scope.id, await mustGetReceipt(db, i.receipt_id));
+      return { ...out, receipt: view };
+    }
+    const credit = i.credit_account ? await accountId(t, i.credit_account) : await dueToAccountId(db);
+    if (!credit)
+      throw unprocessable(
+        'No default account to credit: this org has no single "Due to …" liability. Pass credit_account (ID or code), for example the owner\'s equity or a loan account; check the org profile and notes.',
+        "missing_credit_account",
+      );
+    const r = await t.scope.handle.write((tx) =>
+      bookReceiptTx(tx, t.scope.id, t.scope.actor, i.receipt_id, {
+        as: "entry",
+        credit_account_id: credit,
+        rationale: i.rationale,
+      }),
+    );
+    return { ...outcome(r.result!), receipt: await receiptView(db, t.scope.id, r.receipt) };
+  },
+});
+
+const ATTACHMENT_TARGETS_MCP = ["journal_entry", "bill", "invoice", "receipt", "bank_transaction"] as const;
+type McpAttachmentTarget = (typeof ATTACHMENT_TARGETS_MCP)[number];
+
+/** Refuses a target that doesn't exist (linkAttachmentTx doesn't check). */
+async function assertTargetExists(db: OrgDb | OrgTx, type: McpAttachmentTarget, id: string) {
+  const table = {
+    journal_entry: org.journalEntries,
+    bill: org.bills,
+    invoice: org.invoices,
+    receipt: org.receipts,
+    bank_transaction: org.bankTransactions,
+  }[type];
+  const row = await db.select({ id: table.id }).from(table).where(eq(table.id, id)).get();
+  if (!row) throw notFound(`The ${type.replace("_", " ")} ${id}`);
+}
+
+tool({
+  name: "list_attachments",
+  title: "Files on a record",
+  description:
+    "The files (receipts, bill PDFs) linked to a journal entry, bill, invoice, receipt, or bank transaction, newest first, with their attachment IDs. Use an ID with link_attachment to link the same file to another record. download_url needs the person's sign-in; to see a receipt's image, use get_receipt.",
+  money: false,
+  input: z.object({
+    target_type: z.enum(ATTACHMENT_TARGETS_MCP),
+    target_id: z.string(),
+  }),
+  async run(t, i) {
+    const db = t.scope.handle.db;
+    await assertTargetExists(db, i.target_type, i.target_id);
+    const base = t.ctx.config.server.public_url.replace(/\/$/, "");
+    const files = await listAttachments(db, { type: i.target_type, id: i.target_id });
+    return {
+      data: files.map((f) => ({
+        ...f,
+        download_url: `${base}/api/v1/orgs/${t.scope.id}/attachments/${f.id}`,
+      })),
+    };
+  },
+});
+
+tool({
+  name: "link_attachment",
+  title: "Link a file to another record",
+  description:
+    "Link a file that is already in Cosimo (an attachment ID from list_attachments or a receipt's attachments) to a journal entry, bill, invoice, receipt, or bank transaction, for example a receipt's photo to the entry that books it. The file is not copied, and its other links stay. Linking to a receipt adds it to the receipt's files (and to the records the receipt is matched or booked to). This applies directly and is recorded in the audit log; it is not a proposal and doesn't go to the review queue. Uploading a new file isn't possible here: give the person a receipt's attach_url instead.",
+  write: true,
+  money: false,
+  input: z.object({
+    attachment_id: z.string(),
+    target_type: z.enum(ATTACHMENT_TARGETS_MCP),
+    target_id: z.string(),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const target = { type: i.target_type, id: i.target_id };
+    await t.scope.handle.write(async (tx) => {
+      await mustGetAttachment(tx, i.attachment_id);
+      await assertTargetExists(tx, i.target_type, i.target_id);
+      if (i.target_type === "receipt")
+        await linkReceiptFileTx(tx, t.scope.id, t.scope.actor, i.target_id, i.attachment_id);
+      else await linkAttachmentTx(tx, t.scope.id, t.scope.actor, i.attachment_id, target);
+    });
+    return {
+      attachment_id: i.attachment_id,
+      target,
+      message: "Linked. Files apply directly; this did not go to the review queue.",
+    };
+  },
+});
+
+tool({
   name: "propose_reversal",
   title: "Propose reversing a posted entry",
   description:
@@ -1703,7 +1890,7 @@ tool({
   name: "propose_replacement",
   title: "Propose correcting a posted entry",
   description:
-    "Propose correcting a posted journal entry: the original is reversed and a corrected entry (the date, memo, and balanced lines you give, in the same format as create_manual_entry) is posted in its place. It is one review item: a person approves both halves together or neither, and nothing changes until then. Use get_entry first to see the original's lines. Entries created by an invoice, bill, or payment are refused (for a payment's date, use propose_payment_date_change). An entry that is already reversed, or has a reversal or replacement waiting, is refused too.",
+    "Propose correcting a posted journal entry: the original is reversed and a corrected entry (the date, memo, and balanced lines you give, in the same format as create_manual_entry) is posted in its place. It is one review item: a person approves both halves together or neither, and nothing changes until then. Use get_entry first to see the original's lines. A line's contact_id sets its contact (copy the original's to keep it). The original's files are linked to the replacement unless keep_attachments is false, and a receipt booked to the original points at the replacement. Entries created by an invoice, bill, or payment are refused (for a payment's date, use propose_payment_date_change). An entry that is already reversed, or has a reversal or replacement waiting, is refused too.",
   write: true,
   money: true,
   input: z.object({
@@ -1711,6 +1898,10 @@ tool({
     date: IsoDate,
     memo: z.string().max(500).optional(),
     lines: EntryLines,
+    keep_attachments: z
+      .boolean()
+      .default(true)
+      .describe("Link the original's files (receipts) to the replacement. Default true."),
     rationale: Rationale,
   }),
   async run(t, i) {
@@ -1722,6 +1913,7 @@ tool({
         memo: i.memo ?? null,
         lines,
         rationale: i.rationale,
+        keep_attachments: i.keep_attachments,
       }),
     );
     if (r.reviewItemId)

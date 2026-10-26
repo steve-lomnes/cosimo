@@ -146,6 +146,13 @@ describe(`ledger (${DB_MODE})`, () => {
     expect(again.body.error.code).toBe("already_reversed");
 
     const r2 = await post(owner, simple("2026-02-02", 1000));
+    // A file attached to the original is linked to the replacement too, and stays on the original.
+    const fd = new FormData();
+    fd.set("file", new File([new TextEncoder().encode("%PDF-1.4\n%%EOF\n")], "invoice.pdf"));
+    fd.set("target_type", "journal_entry");
+    fd.set("target_id", r2.body.entry.id);
+    const att = await owner.json("POST", `${base()}/attachments`, fd);
+    expect(att.status).toBe(201);
     const rep = await owner.json(
       "POST",
       `${base()}/entries/${r2.body.entry.id}/replace`,
@@ -154,6 +161,13 @@ describe(`ledger (${DB_MODE})`, () => {
     expect(rep.status).toBe(200);
     expect(rep.body.reversal.status).toBe("posted");
     expect(rep.body.replacement.entry.total).toBe(1100);
+    const files = async (id: string) =>
+      (
+        await owner.json("GET", `${base()}/attachments?target_type=journal_entry&target_id=${id}`)
+      ).body.data.map((a: any) => a.id);
+    expect(await files(rep.body.replacement.entry.id)).toEqual([att.body.id]);
+    expect(await files(r2.body.entry.id)).toEqual([att.body.id]);
+    expect(await files(rep.body.reversal.entry.id)).toEqual([]);
     expect((await owner.json("POST", `${base()}/verify`)).body.ok).toBe(true);
   });
 

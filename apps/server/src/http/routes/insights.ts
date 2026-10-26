@@ -41,6 +41,7 @@ export const DashboardSchema = z
     bank_needs_review: z.number().int(),
     bank_pending: CountTotal,
     stale_receipts: z.object({ count: z.number().int() }),
+    receipts_to_book: z.object({ count: z.number().int() }),
     overdue_invoices: z.object({
       count: z.number().int(),
       total: Cents,
@@ -81,7 +82,7 @@ export function insightsRoutes() {
       tags: ["Reports"],
       summary: "Dashboard summary (viewer or higher)",
       description:
-        "Cash across bank accounts (credit cards listed separately as liabilities), income and expense for the current month and fiscal year to date on the org's default basis, pending review items, bank transactions to categorize (not counting rows still pending at the bank or already waiting in the review queue, which are reported separately in bank_pending), receipts left in the inbox for more than 30 days (stale_receipts), overdue invoices (top 5 by balance), bills overdue or due within 7 days, and bank connections that are not active. Amounts are integer cents.",
+        "Cash across bank accounts (credit cards listed separately as liabilities), income and expense for the current month and fiscal year to date on the org's default basis, pending review items, bank transactions to categorize (not counting rows still pending at the bank or already waiting in the review queue, which are reported separately in bank_pending), receipts left in the inbox for more than 30 days (stale_receipts), inbox receipts with no bank account that wait to be booked (receipts_to_book), overdue invoices (top 5 by balance), bills overdue or due within 7 days, and bank connections that are not active. Amounts are integer cents.",
       security: bearerSecurity,
       request: { params: OrgParams },
       responses: { 200: json(DashboardSchema), ...errorResponses },

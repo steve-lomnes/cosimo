@@ -28,6 +28,8 @@ export interface ReplacementInput {
   memo: string | null;
   lines: LineInput[];
   rationale: string | null;
+  /** Copy the original's files to the replacement (default true). */
+  keep_attachments?: boolean;
 }
 
 /** The replacement as stored in the review item's payload (snake_case, like EntryView lines). */
@@ -35,6 +37,8 @@ interface StoredReplacement {
   date: string;
   memo: string | null;
   lines: { account_id: string; amount: number; description: string | null; contact_id: string | null }[];
+  /** Absent in payloads stored before #95, which means true. */
+  keep_attachments?: boolean;
 }
 
 /** Refuses when a replacement of this entry is already waiting in the review queue. */
@@ -92,7 +96,7 @@ export async function proposeReplacementTx(
       a,
       entryId,
       { date: input.date, memo: input.memo, lines: input.lines, rationale: input.rationale },
-      { forcePost: true },
+      { forcePost: true, keepAttachments: input.keep_attachments ?? true },
     );
     return { reviewItemId: null, ...r };
   }
@@ -105,6 +109,7 @@ export async function proposeReplacementTx(
       description: l.description ?? null,
       contact_id: l.contactId ?? null,
     })),
+    keep_attachments: input.keep_attachments ?? true,
   };
   const id = newId();
   const payload = JSON.stringify({ original: orig, replacement });
@@ -151,7 +156,7 @@ registerReviewHandler("entry_replacement", {
         lockOverrideNote: input.lock_override_note ?? null,
         rationale: item.rationale,
       },
-      { forcePost: true },
+      { forcePost: true, keepAttachments: replacement.keep_attachments ?? true },
     );
     await finishReviewTx(tx, orgId, a, item, "approved", input.note ?? null);
     return result;

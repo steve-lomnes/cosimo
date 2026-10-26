@@ -7,6 +7,7 @@ import { createRoute } from "@hono/zod-openapi";
 import { storeBlob } from "../../services/attachments.ts";
 import { normalizeUpload } from "../../services/images.ts";
 import {
+  addReceiptFileTx,
   bookReceiptTx,
   createReceiptTx,
   dismissReceiptTx,
@@ -17,6 +18,7 @@ import {
   type ReceiptInput,
   receiptCandidates,
   receiptView,
+  removeReceiptFileTx,
   restoreReceiptTx,
   setReceiptFileTx,
   unmatchReceiptTx,
@@ -55,6 +57,16 @@ const TxnSummarySchema = z
   })
   .openapi("ReceiptTransaction");
 
+const ReceiptFileSchema = z
+  .object({
+    id: z.string(),
+    filename: z.string(),
+    mime_type: z.string(),
+    size_bytes: z.number().int(),
+    download_url: z.string(),
+  })
+  .openapi("ReceiptFile");
+
 export const ReceiptSchema = z
   .object({
     id: z.string(),
@@ -73,16 +85,15 @@ export const ReceiptSchema = z
     business_purpose: z.string().nullable(),
     attendees: z.string().nullable(),
     location: z.string().nullable(),
+    paid_with_note: z
+      .string()
+      .nullable()
+      .openapi({ description: "How it was paid when not from a bank account (free text)" }),
     extraction_source: z.enum(["manual", "assistant"]),
-    attachment: z
-      .object({
-        id: z.string(),
-        filename: z.string(),
-        mime_type: z.string(),
-        size_bytes: z.number().int(),
-        download_url: z.string(),
-      })
-      .nullable(),
+    /** The receipt's files, oldest first. */
+    attachments: z.array(ReceiptFileSchema),
+    /** The first file, for clients written when a receipt held one. */
+    attachment: z.union([ReceiptFileSchema, z.null()]),
     matched_bank_txn_id: z.string().nullable(),
     match_method: z.enum(["auto", "manual", "confirmed"]).nullable(),
     matched_at: z.string().nullable(),
@@ -122,6 +133,7 @@ const ReceiptFields = z.object({
   business_purpose: z.string().max(1000).nullable().optional(),
   attendees: z.string().max(1000).nullable().optional(),
   location: z.string().max(200).nullable().optional(),
+  paid_with_note: z.string().max(200).nullable().optional(),
 });
 
 /** The same fields as multipart form strings (empty means null), with the file. */
@@ -197,6 +209,9 @@ export function receiptRoutes() {
             .string()
             .optional()
             .openapi({ description: "Comma-separated: inbox, matched, booked, dismissed" }),
+          no_bank_account: z.enum(["true", "false"]).optional().openapi({
+            description: "true: only receipts with no bank account (paid personally or in cash)",
+          }),
           limit: z.coerce.number().int().min(1).max(500).optional(),
           cursor: z.string().optional(),
         }),
@@ -215,7 +230,15 @@ export function receiptRoutes() {
         .filter((s): s is (typeof RECEIPT_STATUSES)[number] =>
           (RECEIPT_STATUSES as readonly string[]).includes(s),
         );
-      return c.json(await listReceipts(o.handle.db, o.id, { status, limit: q.limit, cursor: q.cursor }), 200);
+      return c.json(
+        await listReceipts(o.handle.db, o.id, {
+          status,
+          noBankAccount: q.no_bank_account === "true",
+          limit: q.limit,
+          cursor: q.cursor,
+        }),
+        200,
+      );
     },
   );
 
@@ -300,9 +323,9 @@ export function receiptRoutes() {
       method: "put",
       path: "/orgs/{orgId}/receipts/{receiptId}/file",
       tags,
-      summary: "Attach or replace the receipt's photo or PDF",
+      summary: "Attach or replace the receipt's first photo or PDF",
       description:
-        "multipart/form-data with `file` (max 20 MB; a HEIC photo is converted to JPEG). Every link the old file had moves to the new one.",
+        "multipart/form-data with `file` (max 20 MB; a HEIC photo is converted to JPEG). Every link the receipt's first file had moves to the new one; with no file yet, it is added. To add another file, use POST `/files`.",
       security: bearerSecurity,
       request: {
         params: ReceiptParams,
@@ -325,6 +348,66 @@ export function receiptRoutes() {
       if (!(body.file instanceof File)) throw badRequest("Attach a file in the `file` field.");
       const blob = await uploaded(c.get("ctx").services.storage as BlobStore, o.id, body.file);
       const row = await o.handle.write((tx) => setReceiptFileTx(tx, o.id, o.actor, id, blob));
+      return c.json(await receiptView(o.handle.db, o.id, row), 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "post",
+      path: "/orgs/{orgId}/receipts/{receiptId}/files",
+      tags,
+      summary: "Add another photo or PDF to a receipt",
+      description:
+        "multipart/form-data with `file` (max 20 MB; a HEIC photo is converted to JPEG). The file is linked wherever the receipt's files are: the matched transaction and its entry, or the bill or entry it was booked to.",
+      security: bearerSecurity,
+      request: {
+        params: ReceiptParams,
+        body: {
+          content: {
+            "multipart/form-data": {
+              schema: z.object({ file: z.any().openapi({ type: "string", format: "binary" }) }),
+            },
+          },
+          required: true,
+        },
+      },
+      responses: { 200: json(ReceiptSchema), ...errorResponses },
+    }),
+    async (c) => {
+      const o = requireWriter(c);
+      const id = c.req.valid("param").receiptId;
+      await mustGetReceipt(o.handle.db, id);
+      const body = await c.req.parseBody();
+      if (!(body.file instanceof File)) throw badRequest("Attach a file in the `file` field.");
+      const blob = await uploaded(c.get("ctx").services.storage as BlobStore, o.id, body.file);
+      const row = await o.handle.write((tx) => addReceiptFileTx(tx, o.id, o.actor, id, blob));
+      return c.json(await receiptView(o.handle.db, o.id, row), 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "delete",
+      path: "/orgs/{orgId}/receipts/{receiptId}/files/{attachmentId}",
+      tags,
+      summary: "Remove a file from a receipt in the inbox or matched",
+      description:
+        "Unlinks the file from the receipt and from its matched transaction and entry; the file itself is kept. A receipt with no amount keeps its last file.",
+      security: bearerSecurity,
+      request: {
+        params: ReceiptParams.extend({
+          attachmentId: Id.openapi({ param: { name: "attachmentId", in: "path" } }),
+        }),
+      },
+      responses: { 200: json(ReceiptSchema), ...errorResponses },
+    }),
+    async (c) => {
+      const o = requireWriter(c);
+      const { receiptId, attachmentId } = c.req.valid("param");
+      const row = await o.handle.write((tx) =>
+        removeReceiptFileTx(tx, o.id, o.actor, receiptId, attachmentId),
+      );
       return c.json(await receiptView(o.handle.db, o.id, row), 200);
     },
   );
@@ -433,7 +516,7 @@ export function receiptRoutes() {
       tags,
       summary: "Book a receipt with no bank transaction, as a draft bill or an entry",
       description:
-        "`as: bill` creates a draft bill (vendor from `vendor_id`, else the receipt's contact) with one line on the receipt's account, to finalize on the bill page. `as: entry` debits the receipt's account and credits `credit_account_id` (for example owner's equity for a personal card), through the review policy. Both need the receipt's amount and account.",
+        "`as: bill` creates a draft bill (vendor from `vendor_id`, else the receipt's contact) with one line on the receipt's account, to finalize on the bill page. `as: entry` debits the receipt's account and credits `credit_account_id` (for a personal card, the \"Due to …\" liability, what the business owes the owner), through the review policy. Both need the receipt's amount and account, and link every file of the receipt to the bill or entry.",
       security: bearerSecurity,
       request: {
         params: ReceiptParams,

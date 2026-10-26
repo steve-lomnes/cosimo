@@ -576,6 +576,9 @@ describe("MCP", () => {
       "match_receipt",
       "unmatch_receipt",
       "dismiss_receipt",
+      "book_receipt",
+      "list_attachments",
+      "link_attachment",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])

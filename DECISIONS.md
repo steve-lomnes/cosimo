@@ -204,7 +204,8 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
 - **Release**: cross-compiles all five binaries on one runner, writes `checksums.txt` signed with
   cosign keyless as one Sigstore bundle (`checksums.txt.sigstore.json`, cosign v3) and adds
   provenance attestations, then pushes a multi-arch GHCR image signed by digest. Bun is pinned by
-  `.bun-version`, which CI keeps equal to the Dockerfile's `oven/bun` tag.
+  the Dockerfile's `oven/bun` tag alone: CI and release install that version through
+  `.github/actions/setup-bun`, so a Dependabot image bump needs no second edit (#97).
 - **Deploy** ships that signed image by digest, never a rebuild: it verifies the signature, copies
   the image to Fly's registry (GHCR is private), checks the digest is unchanged, and deploys it. The tag must equal `VERSION` in
   `packages/shared/src/distribution.ts`.

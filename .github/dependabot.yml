@@ -2,7 +2,10 @@ version: 2
 updates:
   # Action bumps don't change the shipped binary, so they cut a skip release.
   - package-ecosystem: github-actions
-    directory: /
+    # The local setup-bun action pins oven-sh/setup-bun too.
+    directories:
+      - /
+      - /.github/actions/setup-bun
     schedule:
       interval: weekly
     groups:
@@ -13,8 +16,8 @@ updates:
       - release:skip
 
   # Base-image bumps change the shipped image, so leave these unlabeled to cut a patch release.
-  # A bump to oven/bun must come with the same version in .bun-version (CI checks they match), so
-  # CI and the release binaries build with the image's Bun.
+  # The oven/bun tag is also the Bun that CI and the release binaries use (.github/actions/setup-bun
+  # reads it from the Dockerfile), so a bump needs no other change.
   - package-ecosystem: docker
     directory: /
     schedule:

@@ -22,7 +22,7 @@
     "heic-convert": "^2.1.0",
     "hono": "^4.13.11",
     "jpeg-js": "^0.4.4",
-    "nodemailer": "^10.0.10",
+    "nodemailer": "^10.1.7",
     "otpauth": "^9.5.2",
     "pdf-lib": "^1.17.1",
     "smol-toml": "^1.9.0",

@@ -10516,6 +10516,8 @@ export interface paths {
                 query?: {
                     /** @description Comma-separated: inbox, matched, booked, dismissed */
                     status?: string;
+                    /** @description true: only receipts with no bank account (paid personally or in cash) */
+                    no_bank_account?: "true" | "false";
                     limit?: number;
                     cursor?: string;
                 };
@@ -10662,6 +10664,7 @@ export interface paths {
                         business_purpose?: string | null;
                         attendees?: string | null;
                         location?: string | null;
+                        paid_with_note?: string | null;
                     };
                     "multipart/form-data": {
                         /** Format: binary */
@@ -10680,6 +10683,7 @@ export interface paths {
                         business_purpose?: string;
                         attendees?: string;
                         location?: string;
+                        paid_with_note?: string;
                     };
                 };
             };
@@ -10921,6 +10925,7 @@ export interface paths {
                         business_purpose?: string | null;
                         attendees?: string | null;
                         location?: string | null;
+                        paid_with_note?: string | null;
                     };
                 };
             };
@@ -11010,8 +11015,8 @@ export interface paths {
         };
         get?: never;
         /**
-         * Attach or replace the receipt's photo or PDF
-         * @description multipart/form-data with `file` (max 20 MB; a HEIC photo is converted to JPEG). Every link the old file had moves to the new one.
+         * Attach or replace the receipt's first photo or PDF
+         * @description multipart/form-data with `file` (max 20 MB; a HEIC photo is converted to JPEG). Every link the receipt's first file had moves to the new one; with no file yet, it is added. To add another file, use POST `/files`.
          */
         put: {
             parameters: {
@@ -11111,6 +11116,230 @@ export interface paths {
         };
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add another photo or PDF to a receipt
+         * @description multipart/form-data with `file` (max 20 MB; a HEIC photo is converted to JPEG). The file is linked wherever the receipt's files are: the matched transaction and its entry, or the bill or entry it was booked to.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        file?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/receipts/{receiptId}/files/{attachmentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove a file from a receipt in the inbox or matched
+         * @description Unlinks the file from the receipt and from its matched transaction and entry; the file itself is kept. A receipt with no amount keeps its last file.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    receiptId: string;
+                    attachmentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Receipt"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -11673,7 +11902,7 @@ export interface paths {
         put?: never;
         /**
          * Book a receipt with no bank transaction, as a draft bill or an entry
-         * @description `as: bill` creates a draft bill (vendor from `vendor_id`, else the receipt's contact) with one line on the receipt's account, to finalize on the bill page. `as: entry` debits the receipt's account and credits `credit_account_id` (for example owner's equity for a personal card), through the review policy. Both need the receipt's amount and account.
+         * @description `as: bill` creates a draft bill (vendor from `vendor_id`, else the receipt's contact) with one line on the receipt's account, to finalize on the bill page. `as: entry` debits the receipt's account and credits `credit_account_id` (for a personal card, the "Due to …" liability, what the business owes the owner), through the review policy. Both need the receipt's amount and account, and link every file of the receipt to the bill or entry.
          */
         post: {
             parameters: {
@@ -21030,7 +21259,7 @@ export interface paths {
         };
         /**
          * Dashboard summary (viewer or higher)
-         * @description Cash across bank accounts (credit cards listed separately as liabilities), income and expense for the current month and fiscal year to date on the org's default basis, pending review items, bank transactions to categorize (not counting rows still pending at the bank or already waiting in the review queue, which are reported separately in bank_pending), receipts left in the inbox for more than 30 days (stale_receipts), overdue invoices (top 5 by balance), bills overdue or due within 7 days, and bank connections that are not active. Amounts are integer cents.
+         * @description Cash across bank accounts (credit cards listed separately as liabilities), income and expense for the current month and fiscal year to date on the org's default basis, pending review items, bank transactions to categorize (not counting rows still pending at the bank or already waiting in the review queue, which are reported separately in bank_pending), receipts left in the inbox for more than 30 days (stale_receipts), inbox receipts with no bank account that wait to be booked (receipts_to_book), overdue invoices (top 5 by balance), bills overdue or due within 7 days, and bank connections that are not active. Amounts are integer cents.
          */
         get: {
             parameters: {
@@ -21929,15 +22158,12 @@ export interface components {
             business_purpose: string | null;
             attendees: string | null;
             location: string | null;
+            /** @description How it was paid when not from a bank account (free text) */
+            paid_with_note: string | null;
             /** @enum {string} */
             extraction_source: "manual" | "assistant";
-            attachment: {
-                id: string;
-                filename: string;
-                mime_type: string;
-                size_bytes: number;
-                download_url: string;
-            } | null;
+            attachments: components["schemas"]["ReceiptFile"][];
+            attachment: components["schemas"]["ReceiptFile"] | null;
             matched_bank_txn_id: string | null;
             /** @enum {string|null} */
             match_method: "auto" | "manual" | "confirmed" | null;
@@ -21954,6 +22180,13 @@ export interface components {
             created_by_actor: string;
             created_at: string;
             updated_at: string;
+        };
+        ReceiptFile: {
+            id: string;
+            filename: string;
+            mime_type: string;
+            size_bytes: number;
+            download_url: string;
         };
         ReceiptTransaction: {
             id: string;
@@ -22900,6 +23133,9 @@ export interface components {
                 total: number;
             };
             stale_receipts: {
+                count: number;
+            };
+            receipts_to_book: {
                 count: number;
             };
             overdue_invoices: {

@@ -5,6 +5,19 @@ import type { components } from "../api/schema";
 export type Receipt = components["schemas"]["Receipt"];
 export type ReceiptCandidate = components["schemas"]["ReceiptCandidate"];
 export type ReceiptStatus = Receipt["status"];
+export type ReceiptFile = components["schemas"]["ReceiptFile"];
+
+/**
+ * The account to credit by default when booking a receipt paid personally: the one active
+ * liability named "Due to …" (what the business owes the owner). The server's rule
+ * (`dueToAccountId`); null when there is none or more than one.
+ */
+export function dueToAccountId(accounts: { id: string; name: string; type: string; is_active: boolean }[]) {
+  const due = accounts.filter(
+    (a) => a.type === "liability" && a.is_active && a.name.toLowerCase().startsWith("due to"),
+  );
+  return due.length === 1 ? due[0]!.id : null;
+}
 
 /** The file picked on the "Snap receipt" button, waiting for the capture form to take it. */
 let pendingFile: File | null = null;

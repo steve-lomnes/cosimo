@@ -48,7 +48,8 @@ Read:
 | `list_invoices`, `list_bills`, `list_bill_payments`, `list_invoice_payments` | Invoices to customers (with the online pay link and whether a bank payment is processing), bills from vendors, payments sent to vendors, and payments received from customers (including any waiting in review and unapplied customer credit) |
 | `list_pending_reviews`, `get_review_item` | The review queue |
 | `list_recurring_templates` | Recurring invoices, bills, and journal entries: schedule, next and upcoming dates, run mode, total, last error, and any change waiting for review |
-| `list_receipts`, `get_receipt` | The receipt inbox (by default receipts with no bank transaction matched yet). `get_receipt` adds the bank transactions that could be the receipt, `attach_url` (the receipt's page in Cosimo), and the receipt's image after the JSON: a JPEG of at most 1568 px on the long edge, or a PDF as an embedded resource |
+| `list_receipts`, `get_receipt` | The receipt inbox (by default receipts with no bank transaction matched yet; `no_bank_account` lists those paid personally or in cash). `get_receipt` adds the bank transactions that could be the receipt, `attach_url` (the receipt's page in Cosimo), and the receipt's files after the JSON, up to four: images as JPEGs of at most 1568 px on the long edge, PDFs as embedded resources |
+| `list_attachments` | The files linked to a journal entry, bill, invoice, receipt, or bank transaction, with their attachment IDs |
 
 `list_uncategorized_transactions` leaves out transactions still pending at the bank: they aren't
 categorizable yet and don't count toward a closed month.
@@ -71,11 +72,12 @@ Propose (each takes a `rationale`, which you see in Review):
 |---|---|
 | `categorize_transaction` | Posts the categorization entry |
 | `create_rule` | Activates the rule |
-| `create_manual_entry` | Posts the entry |
+| `create_manual_entry` | Posts the entry. With `receipt_id` (an inbox receipt), the receipt's files are linked to the entry and the receipt is marked booked |
 | `create_invoice_draft` | Finalizes the invoice (you still decide when to send it). Takes optional `terms` and `due_date`: leave both out for the customer's, then the org's, default terms; a due date alone derives the terms; terms that disagree with the due date are rejected |
-| `create_bill_draft` | Posts the bill to Accounts Payable |
+| `create_bill_draft` | Posts the bill to Accounts Payable. Takes `receipt_id` like `create_manual_entry` |
+| `book_receipt` | Books an inbox receipt that will never meet a bank transaction (paid personally or in cash). `as: "entry"` debits the receipt's account and credits `credit_account`, by default the org's "Due to …" liability (what the business owes the owner); `as: "bill"` drafts a bill from the vendor. Every file on the receipt is linked to the entry or bill |
 | `propose_reversal` | Posts a reversal of a posted entry |
-| `propose_replacement` | Reverses a posted entry and posts the corrected one, together (one review item) |
+| `propose_replacement` | Reverses a posted entry and posts the corrected one, together (one review item). The original's files are linked to the replacement unless `keep_attachments` is false, and a receipt booked to the original points at the replacement. Lines carry `contact_id` |
 | `propose_recurring_template` | Creates, changes, pauses, or resumes a recurring invoice, bill, or journal entry. A template that emails invoices to the customer always waits for a person, whatever the review policies say |
 | `record_invoice_payment` | Records a payment received from a customer against one or more of their open invoices, in full or in part; an amount beyond what is applied stays as customer credit. Pass `transaction_id` to record it from a bank deposit so the cash isn't counted twice. Refuses amounts beyond what is open (payments waiting in review count) |
 | `record_bill_payment` | Records a payment made to a vendor against one or more of their open bills, in full or in part. Takes the date, amount, and the account the money moved through: a bank, other current asset, credit card, other current liability, or owner's equity account. Refuses amounts beyond what is open (payments waiting in review count) |
@@ -92,8 +94,9 @@ Apply directly, without review, and recorded in the audit log:
 |---|---|
 | `create_contact`, `update_contact` | Adds, edits, archives, or unarchives a customer or vendor (contacts don't touch the books) |
 | `append_note` | Adds a dated note attributed to the assistant (notes don't touch the books) |
-| `create_receipt`, `update_receipt` | Captures a receipt from its fields (and optionally a file as base64, up to 10 MB), or fills in or corrects one. `amount` is what the card is charged, tip included. The result includes `attach_url`, where the person adds the photo. Receipts don't touch the books; categorizing the matched transaction still goes through review |
+| `create_receipt`, `update_receipt` | Captures a receipt from its fields (and optionally a file as base64, up to 10 MB), or fills in or corrects one. `amount` is what the card is charged, tip included; `paid_with_note` says how it was paid when not from a bank account. The result includes `attach_url`, where the person adds the photo and any other files. Receipts don't touch the books; categorizing the matched transaction still goes through review |
 | `match_receipt`, `unmatch_receipt`, `dismiss_receipt` | Matches a receipt to its bank transaction, undoes a match or turns down a suggestion ("not this receipt", remembered), or takes a receipt out of the inbox |
+| `link_attachment` | Links a file already in Cosimo to a journal entry, bill, invoice, receipt, or bank transaction (the target must exist). Linking to a receipt adds it to the receipt's files. Uploading new files over MCP isn't possible; the person adds them at a receipt's `attach_url` |
 | `sync_bank_feed` | Fetches new transactions from Plaid now, for one bank account, one connection, or all of them. Rules run as in a scheduled sync, under the same review policies. It returns the new rows, with any rule suggestion. A connection synced within the last minute answers `cooldown` without calling Plaid (Admin → Settings → Plaid sets the interval). `force_refresh` also calls Plaid's `/transactions/refresh`, which Plaid bills separately, only when an instance admin allows it. A connection that needs reconnecting is reported as `needs_reauth`: only a person can fix that. Needs Owner or Bookkeeper |
 
 There are no tools to approve, reject, void, delete, or change lock dates. OAuth access

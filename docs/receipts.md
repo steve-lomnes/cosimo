@@ -42,6 +42,28 @@ Receipts are not ledger entries, so capturing, editing, matching and dismissing 
 away and are recorded in the audit log. Categorizing the transaction goes through the review queue
 as usual.
 
+## Several files
+
+A receipt can hold more than one file, such as the receipt and its itemized slip or an emailed
+confirmation. On the receipt's page, **Add another file** adds one. Every file is attached wherever the
+receipt goes: the matched transaction and its entry, or the bill or entry it was booked to. **Remove**
+takes a file off a receipt that isn't booked yet (and off its transaction and entry); the file itself
+is kept. Through the API, `POST /receipts/{id}/files` adds a file and `PUT /receipts/{id}/file` replaces
+the first one. The Shortcut below is unchanged: each photo it sends is a new receipt.
+
+## Paid personally or in cash
+
+A receipt with no bank account under **Paid with** never meets a bank transaction. Fill in **Paid with
+(if not a bank account)**, for example "Steve's personal Amex", and choose the expense account. Then
+**Book…** opens on a journal entry crediting the "Due to Owner" account (or "Due to Partners", "Due to
+Shareholders"): the business now owes the owner what they paid. The entry's memo ends with "(paid with
+…)", and every file on the receipt is attached to it. The dashboard counts these receipts under
+**Receipts to book**, and the Receipts page lists them with **Paid personally or in cash**.
+
+Set the account and amount before booking. Editing a posted entry reverses it and posts a corrected
+one (the books are append-only), so each correction adds two entries. The corrected entry keeps the
+files, and the receipt points at it.
+
 ## iPhone: share to Cosimo with a Shortcut
 
 The Shortcut sends a photo straight to your receipt inbox with an API token. Set it up once on each

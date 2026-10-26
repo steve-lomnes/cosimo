@@ -87,4 +87,12 @@ describe("receipt matching", () => {
     expect(receiptMemo({ merchant: "Professor Java's", memo: "  " })).toBe("Professor Java's");
     expect(receiptMemo({})).toBeNull();
   });
+
+  test("memo: a paid-with note is appended", () => {
+    expect(receiptMemo({ merchant: "Staples", paid_with_note: "Steve's personal Amex" })).toBe(
+      "Staples (paid with Steve's personal Amex)",
+    );
+    expect(receiptMemo({ merchant: "Staples", paid_with_note: "  " })).toBe("Staples");
+    expect(receiptMemo({ paid_with_note: "cash" })).toBe("Paid with cash");
+  });
 });

@@ -262,6 +262,65 @@ test("0006 adds provider adjustments and payouts, and cash balances on provider 
   await expect(client.execute(po)).rejects.toThrow(/UNIQUE/);
 });
 
+test("0011 moves each receipt's file into attachment_links and keeps the receipts indexes and checks", async () => {
+  const upTo = orgMigrations.findIndex((m) => m.tag === "0011_owner_paid_receipts");
+  expect(upTo).toBeGreaterThan(0);
+  await migrate(client, orgMigrations.slice(0, upTo));
+  const att =
+    "INSERT INTO attachments (id, storage_key, filename, mime_type, size_bytes, sha256) VALUES (?, ?, 'r.jpg', 'image/jpeg', 1, 'x')";
+  for (const id of ["a1", "a2"]) await client.execute({ sql: att, args: [id, `o/${id}`] });
+  const rc = "INSERT INTO receipts (id, receipt_date, amount, attachment_id) VALUES (?, '2026-05-01', ?, ?)";
+  // r1's file was never linked (an older row); r2's already is, as uploads did; r3 has no file.
+  await client.execute({ sql: rc, args: ["r1", 1200, "a1"] });
+  await client.execute({ sql: rc, args: ["r2", 3400, "a2"] });
+  await client.execute({ sql: rc, args: ["r3", 500, null] });
+  await client.execute(
+    "INSERT INTO attachment_links (attachment_id, target_type, target_id) VALUES ('a2', 'receipt', 'r2')",
+  );
+
+  expect(await migrate(client, orgMigrations.slice(0, upTo + 1))).toEqual(["0011_owner_paid_receipts"]);
+  const links = await client.execute(
+    "SELECT attachment_id, target_id FROM attachment_links WHERE target_type = 'receipt' ORDER BY target_id",
+  );
+  expect(links.rows.map((r) => [r.attachment_id, r.target_id])).toEqual([
+    ["a1", "r1"],
+    ["a2", "r2"],
+  ]);
+  const cols = (await client.execute("SELECT name FROM pragma_table_info('receipts')")).rows.map((r) =>
+    String(r.name),
+  );
+  expect(cols).toContain("paid_with_note");
+  expect(cols).not.toContain("attachment_id");
+  const rows = await client.execute("SELECT id, amount, paid_with_note FROM receipts ORDER BY id");
+  expect(rows.rows.map((r) => [r.id, r.amount, r.paid_with_note])).toEqual([
+    ["r1", 1200, null],
+    ["r2", 3400, null],
+    ["r3", 500, null],
+  ]);
+  const idx = (
+    await client.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'receipts'")
+  ).rows.map((r) => String(r.name));
+  expect(idx).toEqual(
+    expect.arrayContaining([
+      "receipts_status_idx",
+      "receipts_amount_date_idx",
+      "receipts_suggested_idx",
+      "receipts_matched_txn_uq",
+    ]),
+  );
+  // The checks survive the rebuild, and point at the renamed table.
+  const ddl = await client.execute(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipts'",
+  );
+  expect(String(ddl.rows[0]?.sql)).not.toContain("__new_receipts");
+  await expect(
+    client.execute("INSERT INTO receipts (id, receipt_date, status) VALUES ('bad', '2026-05-01', 'lost')"),
+  ).rejects.toThrow(/CHECK/);
+  await expect(
+    client.execute("INSERT INTO receipts (id, receipt_date, amount) VALUES ('bad', '2026-05-01', 0)"),
+  ).rejects.toThrow(/CHECK/);
+});
+
 test("0001_known_randall (system) backfills is_sample for the existing demo org by name", async () => {
   const sysDir = mkdtempSync(join(tmpdir(), "cosimo-migrate-sys-"));
   const sysClient = createClient({ url: `file:${join(sysDir, "system.db")}` });

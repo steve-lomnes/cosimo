@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useRouterState, useSearch } from "@tansta
 import { useEffect, useMemo, useState } from "react";
 import { api, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
+import { Attachments } from "../components/Attachments";
 import { RecurringList } from "../components/recurring";
 import {
   Alert,
@@ -265,6 +266,8 @@ export interface DraftLine {
   debit: string;
   credit: string;
   description: string;
+  /** Not edited here, but kept, so editing an entry doesn't drop its lines' contacts. */
+  contact_id: string | null;
 }
 
 let lineKey = 0;
@@ -274,6 +277,7 @@ export const blank = (): DraftLine => ({
   debit: "",
   credit: "",
   description: "",
+  contact_id: null,
 });
 
 export function toDraftLines(e: Entry | null, negate = false): DraftLine[] {
@@ -286,6 +290,7 @@ export function toDraftLines(e: Entry | null, negate = false): DraftLine[] {
       debit: amt > 0 ? centsToDecimal(amt) : "",
       credit: amt < 0 ? centsToDecimal(-amt) : "",
       description: l.description ?? "",
+      contact_id: l.contact_id ?? null,
     };
   });
 }
@@ -478,7 +483,12 @@ export function EntryEditor({
     lines
       .map((l, i) => ({ l, amt: parsed[i] }))
       .filter(({ l, amt }) => l.account_id && amt)
-      .map(({ l, amt }) => ({ account_id: l.account_id, amount: amt!, description: l.description || null }));
+      .map(({ l, amt }) => ({
+        account_id: l.account_id,
+        amount: amt!,
+        description: l.description || null,
+        contact_id: l.contact_id,
+      }));
 
   const invalidate = () =>
     qc
@@ -795,6 +805,9 @@ export function EntryPage() {
               </tr>
             </tbody>
           </Table>
+        </Card>
+        <Card title="Attachments">
+          <Attachments targetType="journal_entry" targetId={e.id} label="Add file" />
         </Card>
         <Card title="Details">
           <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">

@@ -75,6 +75,24 @@ function DashboardBody({ d, orgId }: { d: Dashboard; orgId: string }) {
             }
           />
         )}
+        {d.receipts_to_book.count > 0 && (
+          <Tile
+            label="Receipts to book"
+            value={d.receipts_to_book.count}
+            detail="Paid personally or in cash"
+            attention
+            link={
+              <Link
+                to="/o/$orgId/expenses/receipts"
+                params={{ orgId }}
+                search={{ no_bank_account: true } as never}
+                className={tileLink}
+              >
+                Receipts
+              </Link>
+            }
+          />
+        )}
         <Tile
           label="Waiting for approval"
           value={d.review_pending}

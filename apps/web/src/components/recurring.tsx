@@ -781,6 +781,7 @@ export function RecurringForm({ kind }: { kind: RecurringKind }) {
             debit: (l.amount ?? 0) > 0 ? centsToDecimal(l.amount ?? 0) : "",
             credit: (l.amount ?? 0) < 0 ? centsToDecimal(-(l.amount ?? 0)) : "",
             description: l.description ?? "",
+            contact_id: null,
           })),
         );
       } else {

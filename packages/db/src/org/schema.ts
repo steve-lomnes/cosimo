@@ -633,7 +633,8 @@ export const bankTransactions = sqliteTable(
  * Receipt inbox (#89): a receipt captured when someone pays, before its bank transaction exists.
  * Matched to the card charge once the feed brings it (`matched_bank_txn_id`, at most one receipt
  * per transaction), or suggested on one (`suggested_bank_txn_id`), or booked on its own as a bill
- * or entry. Not a ledger record: changes apply at once and are audited.
+ * or entry. Not a ledger record: changes apply at once and are audited. Its files are the
+ * `attachment_links` rows with `target_type = 'receipt'`, oldest first.
  */
 export const receipts = sqliteTable(
   "receipts",
@@ -661,7 +662,8 @@ export const receipts = sqliteTable(
     businessPurpose: text("business_purpose"),
     attendees: text("attendees"),
     location: text("location"),
-    attachmentId: text("attachment_id").references(() => attachments.id),
+    /** How it was paid when not from a bank account (e.g. "Steve's personal Amex"). */
+    paidWithNote: text("paid_with_note"),
     extractionSource: text("extraction_source", { enum: ["manual", "assistant"] })
       .notNull()
       .default("manual"),

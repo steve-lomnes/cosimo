@@ -9,7 +9,7 @@ import { and, asc, count, eq, inArray, isNull, ne } from "drizzle-orm";
 import { type SyncStatusView, syncStatusView } from "./bank-sync.ts";
 import { listBankAccounts } from "./banking.ts";
 import { accountMap, settingsRow } from "./ledger.ts";
-import { staleReceiptCount } from "./receipts.ts";
+import { receiptsToBookCount, staleReceiptCount } from "./receipts.ts";
 import { runReport } from "./reports.ts";
 import type { OrgHandle } from "./types.ts";
 
@@ -51,6 +51,8 @@ export interface DashboardData {
   bank_pending: { count: number; total: number };
   /** Receipts in the inbox for more than 30 days with no bank transaction matched. */
   stale_receipts: { count: number };
+  /** Inbox receipts with no bank account (paid personally or in cash), waiting to be booked. */
+  receipts_to_book: { count: number };
   overdue_invoices: {
     count: number;
     total: number;
@@ -199,6 +201,7 @@ export async function dashboard(db: Reader, orgId: string, asOf = today()): Prom
     bank_needs_review: bankNeedsReview,
     bank_pending: bankPending,
     stale_receipts: { count: await staleReceiptCount(db, asOf) },
+    receipts_to_book: { count: await receiptsToBookCount(db) },
     overdue_invoices: {
       count: overdue.length,
       total: overdue.reduce((t, i) => t + i.balance_due, 0),

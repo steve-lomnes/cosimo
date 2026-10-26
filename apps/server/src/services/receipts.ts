@@ -24,7 +24,7 @@ import {
 } from "@cosimo/core";
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import { addDays, today } from "@cosimo/shared";
-import { and, count, desc, eq, gte, inArray, lt, lte, ne, or, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, ne, or, type SQL, sql } from "drizzle-orm";
 import { conflict, notFound, unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
 import { linkAttachmentTx, recordAttachmentTx, type storeBlob, unlinkAttachmentTx } from "./attachments.ts";
@@ -36,6 +36,7 @@ import { type SubmitResult, submitEntryTx } from "./ledger.ts";
 type Reader = OrgDb | OrgTx;
 export type ReceiptRow = typeof org.receipts.$inferSelect;
 type BankTxnRow = typeof org.bankTransactions.$inferSelect;
+type AttachmentRow = typeof org.attachments.$inferSelect;
 type StoredBlob = Awaited<ReturnType<typeof storeBlob>>;
 
 export const RECEIPT_STATUSES = ["inbox", "matched", "booked", "dismissed"] as const;
@@ -52,6 +53,14 @@ export interface ReceiptTxnSummary {
   payee: string | null;
   status: BankTxnRow["status"];
   entry_id: string | null;
+}
+
+export interface ReceiptFileView {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  download_url: string;
 }
 
 export interface ReceiptView {
@@ -71,14 +80,12 @@ export interface ReceiptView {
   business_purpose: string | null;
   attendees: string | null;
   location: string | null;
+  paid_with_note: string | null;
   extraction_source: ReceiptRow["extractionSource"];
-  attachment: {
-    id: string;
-    filename: string;
-    mime_type: string;
-    size_bytes: number;
-    download_url: string;
-  } | null;
+  /** The receipt's files, oldest first. */
+  attachments: ReceiptFileView[];
+  /** The first file (kept for clients written when a receipt held one). */
+  attachment: ReceiptFileView | null;
   matched_bank_txn_id: string | null;
   match_method: ReceiptRow["matchMethod"];
   matched_at: string | null;
@@ -127,24 +134,56 @@ function staleCutoff(asOf = today()) {
   return addDays(asOf, -RECEIPT_STALE_DAYS);
 }
 
-/** Views for several receipts, loading their transactions and attachments in two queries. */
+/**
+ * The files of several receipts (their `receipt` links), oldest first, by receipt ID. A receipt's
+ * files are exactly its links: matching, categorizing and booking copy them to other records.
+ */
+async function filesByReceipt(db: Reader, ids: string[]) {
+  const out = new Map<string, AttachmentRow[]>();
+  if (!ids.length) return out;
+  const rows = await db
+    .select({ receiptId: org.attachmentLinks.targetId, a: org.attachments })
+    .from(org.attachmentLinks)
+    .innerJoin(org.attachments, eq(org.attachments.id, org.attachmentLinks.attachmentId))
+    .where(and(eq(org.attachmentLinks.targetType, "receipt"), inArray(org.attachmentLinks.targetId, ids)))
+    .orderBy(asc(org.attachments.createdAt), asc(org.attachments.id))
+    .all();
+  for (const r of rows) out.set(r.receiptId, [...(out.get(r.receiptId) ?? []), r.a]);
+  return out;
+}
+
+/** A receipt's files, oldest first. */
+export async function receiptFiles(db: Reader, receiptId: string): Promise<AttachmentRow[]> {
+  return (await filesByReceipt(db, [receiptId])).get(receiptId) ?? [];
+}
+
+function fileView(orgId: string, a: AttachmentRow): ReceiptFileView {
+  return {
+    id: a.id,
+    filename: a.filename,
+    mime_type: a.mimeType,
+    size_bytes: a.sizeBytes,
+    download_url: `/api/v1/orgs/${orgId}/attachments/${a.id}`,
+  };
+}
+
+/** Views for several receipts, loading their transactions and files in two queries. */
 export async function receiptViews(db: Reader, orgId: string, rows: ReceiptRow[]): Promise<ReceiptView[]> {
   const txnIds = [
     ...new Set(rows.flatMap((r) => [r.matchedBankTxnId ?? r.suggestedBankTxnId].filter(Boolean) as string[])),
   ];
-  const attIds = [...new Set(rows.map((r) => r.attachmentId).filter(Boolean) as string[])];
   const txns = txnIds.length
     ? await db.select().from(org.bankTransactions).where(inArray(org.bankTransactions.id, txnIds)).all()
     : [];
-  const atts = attIds.length
-    ? await db.select().from(org.attachments).where(inArray(org.attachments.id, attIds)).all()
-    : [];
+  const files = await filesByReceipt(
+    db,
+    rows.map((r) => r.id),
+  );
   const tBy = new Map(txns.map((t) => [t.id, t]));
-  const aBy = new Map(atts.map((a) => [a.id, a]));
   const cutoff = staleCutoff();
   return rows.map((r) => {
     const t = tBy.get(r.matchedBankTxnId ?? r.suggestedBankTxnId ?? "");
-    const a = r.attachmentId ? aBy.get(r.attachmentId) : undefined;
+    const atts = (files.get(r.id) ?? []).map((a) => fileView(orgId, a));
     return {
       id: r.id,
       status: r.status,
@@ -162,16 +201,10 @@ export async function receiptViews(db: Reader, orgId: string, rows: ReceiptRow[]
       business_purpose: r.businessPurpose,
       attendees: r.attendees,
       location: r.location,
+      paid_with_note: r.paidWithNote,
       extraction_source: r.extractionSource,
-      attachment: a
-        ? {
-            id: a.id,
-            filename: a.filename,
-            mime_type: a.mimeType,
-            size_bytes: a.sizeBytes,
-            download_url: `/api/v1/orgs/${orgId}/attachments/${a.id}`,
-          }
-        : null,
+      attachments: atts,
+      attachment: atts[0] ?? null,
       matched_bank_txn_id: r.matchedBankTxnId,
       match_method: r.matchMethod,
       matched_at: r.matchedAt,
@@ -211,7 +244,7 @@ function auditFields(r: ReceiptRow) {
     business_purpose: r.businessPurpose,
     attendees: r.attendees,
     location: r.location,
-    attachment_id: r.attachmentId,
+    paid_with_note: r.paidWithNote,
     extraction_source: r.extractionSource,
   };
 }
@@ -228,6 +261,8 @@ export async function mustGetReceipt(db: Reader, id: string) {
 
 export interface ReceiptFilter {
   status?: ReceiptStatus[];
+  /** Only receipts with no "paid with" bank account: paid personally or in cash, to book by hand. */
+  noBankAccount?: boolean;
   limit?: number;
   cursor?: string | null;
 }
@@ -237,6 +272,7 @@ export async function listReceipts(db: Reader, orgId: string, f: ReceiptFilter =
   const r = org.receipts;
   const conds: SQL[] = [];
   if (f.status?.length) conds.push(inArray(r.status, f.status));
+  if (f.noBankAccount) conds.push(isNull(r.bankAccountId));
   if (f.cursor) {
     const [d, id] = f.cursor.split("|");
     if (d && id) conds.push(sql`(${r.receiptDate} < ${d} or (${r.receiptDate} = ${d} and ${r.id} < ${id}))`);
@@ -265,6 +301,39 @@ export async function staleReceiptCount(db: Reader, asOf = today()) {
     .where(and(eq(org.receipts.status, "inbox"), lt(org.receipts.createdAt, staleCutoff(asOf))))
     .get();
   return Number(row?.n ?? 0);
+}
+
+/**
+ * Inbox receipts with no "paid with" bank account, for the dashboard: no bank transaction will come
+ * for them, so they wait to be booked by hand.
+ */
+export async function receiptsToBookCount(db: Reader) {
+  const row = await db
+    .select({ n: count() })
+    .from(org.receipts)
+    .where(and(eq(org.receipts.status, "inbox"), isNull(org.receipts.bankAccountId)))
+    .get();
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * The default account to credit when booking a receipt paid personally: the one active liability
+ * named "Due to …" (every chart template has one, such as "Due to Owner"). Null when there is none
+ * or more than one.
+ */
+export async function dueToAccountId(db: Reader): Promise<string | null> {
+  const rows = await db
+    .select({ id: org.accounts.id })
+    .from(org.accounts)
+    .where(
+      and(
+        eq(org.accounts.type, "liability"),
+        eq(org.accounts.isActive, true),
+        sql`lower(${org.accounts.name}) like 'due to%'`,
+      ),
+    )
+    .all();
+  return rows.length === 1 ? rows[0]!.id : null;
 }
 
 /** For bank transaction views: the matched receipt, and the inbox receipts suggested for each. */
@@ -464,38 +533,65 @@ async function hasLink(tx: Reader, attachmentId: string, type: string, id: strin
   return Boolean(row);
 }
 
-/** Link the file to a record unless it already is (so the audit log isn't repeated). */
+type LinkTarget = { type: "receipt" | "bank_transaction" | "journal_entry" | "bill"; id: string };
+
+/** Link files to a record, skipping those already linked (so the audit log isn't repeated). */
 async function ensureLinkTx(
   tx: OrgTx,
   orgId: string,
   a: ActorInfo,
-  attachmentId: string | null,
-  target: { type: "receipt" | "bank_transaction" | "journal_entry" | "bill"; id: string },
+  attachmentIds: string[],
+  target: LinkTarget,
 ) {
-  if (!attachmentId || (await hasLink(tx, attachmentId, target.type, target.id))) return;
-  await linkAttachmentTx(tx, orgId, a, attachmentId, target);
+  for (const id of attachmentIds)
+    if (!(await hasLink(tx, id, target.type, target.id))) await linkAttachmentTx(tx, orgId, a, id, target);
 }
 
 async function dropLinkTx(
   tx: OrgTx,
   orgId: string,
   a: ActorInfo,
-  attachmentId: string | null,
+  attachmentIds: string[],
   target: { type: string; id: string },
 ) {
-  if (!attachmentId || !(await hasLink(tx, attachmentId, target.type, target.id))) return;
-  await unlinkAttachmentTx(tx, orgId, a, attachmentId, target);
+  for (const id of attachmentIds)
+    if (await hasLink(tx, id, target.type, target.id)) await unlinkAttachmentTx(tx, orgId, a, id, target);
 }
 
-/** The links a receipt's file should have: the receipt, and when matched, the transaction and its entry. */
-async function ensureLinksTx(tx: OrgTx, orgId: string, a: ActorInfo, r: ReceiptRow) {
-  if (!r.attachmentId) return;
-  await ensureLinkTx(tx, orgId, a, r.attachmentId, { type: "receipt", id: r.id });
+async function fileIds(tx: Reader, receiptId: string) {
+  return (await receiptFiles(tx, receiptId)).map((f) => f.id);
+}
+
+/** The links a receipt's files should have when it is matched: the transaction and its entry. */
+async function ensureLinksTx(tx: OrgTx, orgId: string, a: ActorInfo, r: ReceiptRow, ids?: string[]) {
   if (r.status !== "matched" || !r.matchedBankTxnId) return;
-  await ensureLinkTx(tx, orgId, a, r.attachmentId, { type: "bank_transaction", id: r.matchedBankTxnId });
+  const files = ids ?? (await fileIds(tx, r.id));
+  if (!files.length) return;
+  await ensureLinkTx(tx, orgId, a, files, { type: "bank_transaction", id: r.matchedBankTxnId });
   const t = await mustGetBankTxn(tx, r.matchedBankTxnId);
   if (t.matchedEntryId)
-    await ensureLinkTx(tx, orgId, a, r.attachmentId, { type: "journal_entry", id: t.matchedEntryId });
+    await ensureLinkTx(tx, orgId, a, files, { type: "journal_entry", id: t.matchedEntryId });
+}
+
+/** Unlink files from a transaction and from the entries categorizing it (unmatch, file removal). */
+async function dropFromTxnTx(tx: OrgTx, orgId: string, a: ActorInfo, files: string[], txnId: string) {
+  if (!files.length) return;
+  await dropLinkTx(tx, orgId, a, files, { type: "bank_transaction", id: txnId });
+  const t = await tx.select().from(org.bankTransactions).where(eq(org.bankTransactions.id, txnId)).get();
+  const entries = await tx
+    .select({ id: org.journalEntries.id })
+    .from(org.journalEntries)
+    .where(
+      or(
+        t?.matchedEntryId ? eq(org.journalEntries.id, t.matchedEntryId) : sql`0`,
+        and(
+          inArray(org.journalEntries.sourceType, ["bank_transaction", "transfer"]),
+          eq(org.journalEntries.sourceId, txnId),
+        ),
+      ),
+    )
+    .all();
+  for (const e of entries) await dropLinkTx(tx, orgId, a, files, { type: "journal_entry", id: e.id });
 }
 
 /** Point an inbox receipt at its best candidate, unless it already points at a valid one. */
@@ -635,7 +731,7 @@ export async function onTxnCategorizedTx(
     if (sug.length !== 1) return;
     r = await attachTx(tx, orgId, a, sug[0]!, await mustGetBankTxn(tx, txnId), "confirmed");
   }
-  await ensureLinkTx(tx, orgId, a, r.attachmentId, { type: "journal_entry", id: entryId });
+  await ensureLinkTx(tx, orgId, a, await fileIds(tx, r.id), { type: "journal_entry", id: entryId });
 }
 
 /**
@@ -647,7 +743,7 @@ export async function releaseReceiptsForTxnTx(tx: OrgTx, orgId: string, a: Actor
   const ids: string[] = [];
   const matched = await tx.select().from(org.receipts).where(eq(org.receipts.matchedBankTxnId, txnId)).all();
   for (const r of matched) {
-    await dropLinkTx(tx, orgId, a, r.attachmentId, { type: "bank_transaction", id: txnId });
+    await dropLinkTx(tx, orgId, a, await fileIds(tx, r.id), { type: "bank_transaction", id: txnId });
     await tx
       .update(org.receipts)
       .set({
@@ -705,6 +801,7 @@ export interface ReceiptInput {
   business_purpose?: string | null;
   attendees?: string | null;
   location?: string | null;
+  paid_with_note?: string | null;
   extraction_source?: "manual" | "assistant";
 }
 
@@ -723,6 +820,7 @@ const FIELDS: [keyof ReceiptInput, keyof typeof org.receipts.$inferInsert][] = [
   ["business_purpose", "businessPurpose"],
   ["attendees", "attendees"],
   ["location", "location"],
+  ["paid_with_note", "paidWithNote"],
   ["extraction_source", "extractionSource"],
 ];
 
@@ -801,10 +899,7 @@ export async function createReceiptTx(
     if (v !== undefined && v !== null) (values as Record<string, unknown>)[col] = v;
   }
   await tx.insert(org.receipts).values(values);
-  if (blob) {
-    await recordAttachmentTx(tx, orgId, a, blob, { type: "receipt", id });
-    await tx.update(org.receipts).set({ attachmentId: blob.id }).where(eq(org.receipts.id, id));
-  }
+  if (blob) await recordAttachmentTx(tx, orgId, a, blob, { type: "receipt", id });
   const row = await mustGetReceipt(tx, id);
   await appendAudit(tx, orgId, a, {
     action: "receipt.create",
@@ -842,7 +937,7 @@ export async function updateReceiptTx(
   patch.updatedAt = new Date().toISOString();
   await tx.update(org.receipts).set(patch).where(eq(org.receipts.id, id));
   const after = await mustGetReceipt(tx, id);
-  if (after.amount == null && !after.attachmentId)
+  if (after.amount == null && !(await receiptFiles(tx, id)).length)
     throw unprocessable("A receipt needs a photo or the amount charged.", "receipt_empty");
   await appendAudit(tx, orgId, a, {
     action: "receipt.update",
@@ -859,50 +954,130 @@ export async function updateReceiptTx(
   return mustGetReceipt(tx, id);
 }
 
-/**
- * Attach or replace the receipt's file. Every link the old file had (receipt, transaction, entry,
- * bill) moves to the new one, so the old file is left unlinked but kept (attachments are never
- * deleted).
- */
-export async function setReceiptFileTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string, blob: StoredBlob) {
-  const before = await mustGetReceipt(tx, id);
-  await recordAttachmentTx(tx, orgId, a, blob, null);
-  if (before.attachmentId) {
-    const links = await tx
-      .select()
-      .from(org.attachmentLinks)
-      .where(eq(org.attachmentLinks.attachmentId, before.attachmentId))
-      .all();
-    for (const l of links) {
-      await unlinkAttachmentTx(tx, orgId, a, before.attachmentId, { type: l.targetType, id: l.targetId });
-      await tx
-        .insert(org.attachmentLinks)
-        .values({ attachmentId: blob.id, targetType: l.targetType, targetId: l.targetId })
-        .onConflictDoNothing();
-      await appendAudit(tx, orgId, a, {
-        action: "attachment.link",
-        targetType: "attachment",
-        targetId: blob.id,
-        after: { type: l.targetType, id: l.targetId },
-      });
-    }
-  }
-  await tx
-    .update(org.receipts)
-    .set({ attachmentId: blob.id, updatedAt: new Date().toISOString() })
-    .where(eq(org.receipts.id, id));
+/** Audit a change to a receipt's files and refresh what follows from them. */
+async function filesChangedTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string, before: string[]) {
+  await tx.update(org.receipts).set({ updatedAt: new Date().toISOString() }).where(eq(org.receipts.id, id));
   const after = await mustGetReceipt(tx, id);
   await appendAudit(tx, orgId, a, {
     action: "receipt.update",
     targetType: "receipt",
     targetId: id,
-    before: { attachment_id: before.attachmentId },
-    after: { attachment_id: blob.id },
+    before: { attachment_ids: before },
+    after: { attachment_ids: await fileIds(tx, id) },
   });
-  await ensureLinksTx(tx, orgId, a, after);
-  if (after.bookedTargetType && after.bookedTargetId)
-    await ensureLinkTx(tx, orgId, a, blob.id, { type: after.bookedTargetType, id: after.bookedTargetId });
+  return after;
+}
+
+/** Link the receipt's files where it carries them: the matched transaction and its entry, the booked record. */
+async function spreadFilesTx(tx: OrgTx, orgId: string, a: ActorInfo, r: ReceiptRow, ids: string[]) {
+  await ensureLinksTx(tx, orgId, a, r, ids);
+  if (r.bookedTargetType && r.bookedTargetId)
+    await ensureLinkTx(tx, orgId, a, ids, { type: r.bookedTargetType, id: r.bookedTargetId });
+}
+
+/**
+ * Add a file to the receipt (any status): it is linked wherever the receipt's files are, and an
+ * inbox receipt is matched again.
+ */
+export async function addReceiptFileTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string, blob: StoredBlob) {
+  await mustGetReceipt(tx, id);
+  const before = await fileIds(tx, id);
+  await recordAttachmentTx(tx, orgId, a, blob, { type: "receipt", id });
+  return fileAddedTx(tx, orgId, a, id, before, blob.id);
+}
+
+/** Add a file already stored (an attachment on another record) to the receipt, as `addReceiptFileTx`. */
+export async function linkReceiptFileTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  attachmentId: string,
+) {
+  await mustGetReceipt(tx, id);
+  const before = await fileIds(tx, id);
+  if (before.includes(attachmentId)) return mustGetReceipt(tx, id);
+  await linkAttachmentTx(tx, orgId, a, attachmentId, { type: "receipt", id });
+  return fileAddedTx(tx, orgId, a, id, before, attachmentId);
+}
+
+async function fileAddedTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  before: string[],
+  attachmentId: string,
+) {
+  const after = await filesChangedTx(tx, orgId, a, id, before);
+  await spreadFilesTx(tx, orgId, a, after, [attachmentId]);
   if (after.status === "inbox") await matchForReceiptTx(tx, orgId, a, id);
+  return mustGetReceipt(tx, id);
+}
+
+/**
+ * Attach or replace the receipt's first file (PUT `/file`, which the iOS Shortcut and older clients
+ * use). Every link the old file had (receipt, transaction, entry, bill) moves to the new one, so the
+ * old file is left unlinked but kept (attachments are never deleted). With no file yet, it is added.
+ */
+export async function setReceiptFileTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string, blob: StoredBlob) {
+  await mustGetReceipt(tx, id);
+  const before = await fileIds(tx, id);
+  const old = before[0];
+  if (!old) return addReceiptFileTx(tx, orgId, a, id, blob);
+  await recordAttachmentTx(tx, orgId, a, blob, null);
+  const links = await tx
+    .select()
+    .from(org.attachmentLinks)
+    .where(eq(org.attachmentLinks.attachmentId, old))
+    .all();
+  for (const l of links) {
+    await unlinkAttachmentTx(tx, orgId, a, old, { type: l.targetType, id: l.targetId });
+    await tx
+      .insert(org.attachmentLinks)
+      .values({ attachmentId: blob.id, targetType: l.targetType, targetId: l.targetId })
+      .onConflictDoNothing();
+    await appendAudit(tx, orgId, a, {
+      action: "attachment.link",
+      targetType: "attachment",
+      targetId: blob.id,
+      after: { type: l.targetType, id: l.targetId },
+    });
+  }
+  const after = await filesChangedTx(tx, orgId, a, id, before);
+  await spreadFilesTx(tx, orgId, a, after, [blob.id]);
+  if (after.status === "inbox") await matchForReceiptTx(tx, orgId, a, id);
+  return mustGetReceipt(tx, id);
+}
+
+/**
+ * Take a file off a receipt in the inbox or matched: it is unlinked from the receipt, and from the
+ * matched transaction and its entries. The file itself is kept. A receipt with no amount keeps its
+ * last file.
+ */
+export async function removeReceiptFileTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  attachmentId: string,
+) {
+  const r = await mustGetReceipt(tx, id);
+  if (r.status !== "inbox" && r.status !== "matched")
+    throw conflict(
+      r.status === "booked"
+        ? "This receipt is booked; remove the file from the bill or entry instead."
+        : `This receipt is ${r.status}.`,
+      "invalid_state",
+    );
+  const before = await fileIds(tx, id);
+  if (!before.includes(attachmentId)) throw notFound("Attachment");
+  if (before.length === 1 && r.amount == null)
+    throw unprocessable("A receipt needs a photo or the amount charged.", "receipt_empty");
+  await unlinkAttachmentTx(tx, orgId, a, attachmentId, { type: "receipt", id });
+  if (r.status === "matched" && r.matchedBankTxnId)
+    await dropFromTxnTx(tx, orgId, a, [attachmentId], r.matchedBankTxnId);
+  await filesChangedTx(tx, orgId, a, id, before);
   return mustGetReceipt(tx, id);
 }
 
@@ -938,25 +1113,7 @@ export async function unmatchReceiptTx(tx: OrgTx, orgId: string, a: ActorInfo, i
   const txnId =
     r.status === "matched" ? r.matchedBankTxnId : r.status === "inbox" ? r.suggestedBankTxnId : null;
   if (!txnId) throw conflict("This receipt isn't matched to a transaction.", "invalid_state");
-  if (r.status === "matched" && r.attachmentId) {
-    await dropLinkTx(tx, orgId, a, r.attachmentId, { type: "bank_transaction", id: txnId });
-    const t = await tx.select().from(org.bankTransactions).where(eq(org.bankTransactions.id, txnId)).get();
-    const entries = await tx
-      .select({ id: org.journalEntries.id })
-      .from(org.journalEntries)
-      .where(
-        or(
-          t?.matchedEntryId ? eq(org.journalEntries.id, t.matchedEntryId) : sql`0`,
-          and(
-            inArray(org.journalEntries.sourceType, ["bank_transaction", "transfer"]),
-            eq(org.journalEntries.sourceId, txnId),
-          ),
-        ),
-      )
-      .all();
-    for (const e of entries)
-      await dropLinkTx(tx, orgId, a, r.attachmentId, { type: "journal_entry", id: e.id });
-  }
+  if (r.status === "matched") await dropFromTxnTx(tx, orgId, a, await fileIds(tx, r.id), txnId);
   await tx
     .update(org.receipts)
     .set({
@@ -1037,17 +1194,15 @@ export type BookInput =
  * as a draft bill to finalize on the bill page, or as an entry through the review policy.
  */
 export async function bookReceiptTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string, input: BookInput) {
-  const r = await mustGetReceipt(tx, id);
-  if (r.status !== "inbox")
-    throw conflict(
-      r.status === "matched"
-        ? "This receipt is matched to a bank transaction; categorize that instead."
-        : `This receipt is ${r.status}.`,
-      "invalid_state",
-    );
+  const r = await assertBookableReceipt(tx, id);
   if (r.amount == null) throw unprocessable("Add the amount before booking the receipt.", "missing_amount");
   if (!r.accountId) throw unprocessable("Choose the account before booking the receipt.", "missing_account");
-  const memo = receiptMemo({ memo: r.memo, merchant: r.merchant, business_purpose: r.businessPurpose });
+  const memo = receiptMemo({
+    memo: r.memo,
+    merchant: r.merchant,
+    business_purpose: r.businessPurpose,
+    paid_with_note: r.paidWithNote,
+  });
   let target: { type: "bill" | "journal_entry"; id: string };
   let result: SubmitResult | null = null;
   if (input.as === "bill") {
@@ -1077,6 +1232,34 @@ export async function bookReceiptTx(tx: OrgTx, orgId: string, a: ActorInfo, id: 
     });
     target = { type: "journal_entry", id: result.entry.id };
   }
+  const receipt = await markReceiptBookedTx(tx, orgId, a, r, target);
+  return { receipt, target, result };
+}
+
+/** Refuses a receipt that can't be booked: only inbox receipts can. */
+export async function assertBookableReceipt(tx: Reader, id: string) {
+  const r = await mustGetReceipt(tx, id);
+  if (r.status !== "inbox")
+    throw conflict(
+      r.status === "matched"
+        ? "This receipt is matched to a bank transaction; categorize that instead."
+        : `This receipt is ${r.status}.`,
+      "invalid_state",
+    );
+  return r;
+}
+
+/**
+ * Mark an inbox receipt booked to a bill or entry made from it, and link all its files there. Used
+ * by `bookReceiptTx` and by MCP tools that create the entry or bill themselves (`receipt_id`).
+ */
+export async function markReceiptBookedTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  r: ReceiptRow,
+  target: { type: "bill" | "journal_entry"; id: string },
+) {
   await tx
     .update(org.receipts)
     .set({
@@ -1086,16 +1269,16 @@ export async function bookReceiptTx(tx: OrgTx, orgId: string, a: ActorInfo, id: 
       bookedTargetId: target.id,
       updatedAt: new Date().toISOString(),
     })
-    .where(eq(org.receipts.id, id));
-  await ensureLinkTx(tx, orgId, a, r.attachmentId, target);
+    .where(eq(org.receipts.id, r.id));
+  await ensureLinkTx(tx, orgId, a, await fileIds(tx, r.id), target);
   await appendAudit(tx, orgId, a, {
     action: "receipt.book",
     targetType: "receipt",
-    targetId: id,
-    after: { as: input.as, target_type: target.type, target_id: target.id },
+    targetId: r.id,
+    after: { as: target.type === "bill" ? "bill" : "entry", target_type: target.type, target_id: target.id },
   });
   await refreshTxnSuggestionTx(tx, r.suggestedBankTxnId);
-  return { receipt: await mustGetReceipt(tx, id), target, result };
+  return mustGetReceipt(tx, r.id);
 }
 
 /** Candidate transactions for the match picker, best first; rejected ones are included and flagged. */

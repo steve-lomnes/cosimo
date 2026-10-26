@@ -8,7 +8,7 @@ import { ContactsPage } from "./pages/contacts";
 import { EntriesPage, EntryPage, NewEntryPage, validateEntrySearch } from "./pages/entries";
 import { InvoicePage, InvoicesPage, NewInvoicePage } from "./pages/invoices";
 import { OpeningBalancesPage } from "./pages/ledger-settings";
-import { NewReceiptPage, ReceiptPage, ReceiptsPage } from "./pages/receipts";
+import { NewReceiptPage, ReceiptPage, ReceiptsPage, validateReceiptsSearch } from "./pages/receipts";
 import { ReconcileListPage, ReconcilePage } from "./pages/reconcile";
 import { ReportsPage, validateReportSearch } from "./pages/reports";
 import { ReviewQueuePage } from "./pages/review";
@@ -65,7 +65,7 @@ export function orgChildRoutes(parent: AnyRoute): AnyRoute[] {
           },
         }) as unknown as AnyRoute,
     ),
-    r("/expenses/receipts", ReceiptsPage),
+    r("/expenses/receipts", ReceiptsPage, validateReceiptsSearch),
     r("/expenses/receipts/new", NewReceiptPage),
     r("/expenses/receipts/$receiptId", ReceiptPage),
     r("/banking/rules", RulesPage),

@@ -105,6 +105,10 @@ Fields:
   in. For a meal where the tip is added after signing, also give `pre_tip_amount` (subtotal plus
   tax), so a charge with a different tip still matches.
 - `bank_account_id` ("paid with") is the card or account it was paid from, when you know it.
+- `paid_with_note` says how it was paid when that isn't one of the org's bank accounts (a personal
+  card, cash). It goes into the booked entry's memo.
+- A receipt can hold several files (the receipt and an itemized slip, say). Each one the person
+  adds at `attach_url` is linked wherever the receipt is matched or booked.
 
 Then:
 
@@ -114,9 +118,31 @@ Then:
 - Categorizing a transaction with a suggested receipt confirms the match. When the suggestion comes
   from a receipt (`suggestion.source` is `receipt`), use its account unless the profile says
   otherwise.
-- A personal purchase or a duplicate can be taken out with `dismiss_receipt` (give the reason). A
-  receipt paid in cash or from a personal card never meets a bank transaction: tell the person to
-  book it from the receipt's page in Cosimo.
+- A personal purchase or a duplicate can be taken out with `dismiss_receipt` (give the reason).
+
+### Paid personally (owner-paid expenses)
+
+A business expense paid in cash or on a personal card never meets a bank transaction, so book it
+from the receipt:
+
+1. `create_receipt` with the amount, date, merchant, `account` (the expense), `contact_id` (the
+   vendor), and `paid_with_note` (for example "Steve's personal Amex"). Leave `bank_account_id` out.
+2. Give the person the `attach_url` and ask them to add every supporting file there (the receipt,
+   an itemized slip, an email confirmation). You can't upload files yourself.
+3. `book_receipt` with `as: "entry"`. It debits the receipt's account and credits the org's "Due to
+   …" liability (what the business now owes the owner) unless you pass `credit_account`. Check the
+   org profile and notes first in case this business books owner-paid expenses elsewhere. Every
+   file on the receipt is linked to the entry, which waits in the review queue.
+
+Get the account and amount right on the receipt before booking (`update_receipt`): booking uses
+them. Correcting a posted entry afterwards adds a reversal and a replacement each time (the ledger is
+append-only), so a fix after booking leaves four entries where one would do. If you do need
+`propose_replacement`, copy each line's `contact_id`; the files and the receipt move to the
+replacement unless you pass `keep_attachments: false`.
+
+To book a receipt as part of an entry or bill you build yourself, pass its `receipt_id` to
+`create_manual_entry` or `create_bill_draft`. To put a file that is already in Cosimo on another
+record, find it with `list_attachments` and link it with `link_attachment`.
 
 ## Invoice follow-up
 

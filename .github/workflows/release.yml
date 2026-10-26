@@ -95,10 +95,9 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: ./.github/actions/setup-bun
         with:
           no-cache: true
-          bun-version-file: .bun-version
       # --os/--cpu '*' installs every platform's optional deps, so each target's
       # @libsql/<platform> native addon is present for cross-compilation.
       - run: bun install --frozen-lockfile --os='*' --cpu='*'

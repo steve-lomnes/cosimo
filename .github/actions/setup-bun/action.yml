@@ -1,0 +1,24 @@
+name: Set up Bun
+description: >-
+  Install the Bun version of the Dockerfile's oven/bun image, so CI, the release binaries and the
+  image build with the same Bun (#29). The Dockerfile is the only place the version is written, so
+  a Dependabot bump of the image needs no other change (#97).
+inputs:
+  no-cache:
+    description: Passed to oven-sh/setup-bun.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - id: version
+      shell: bash
+      run: |
+        set -euo pipefail
+        v=$(sed -nE 's|^FROM .*oven/bun:([0-9][^@ ]*)[@ ].*|\1|p' Dockerfile | head -1)
+        [ -n "$v" ] || { echo "::error::The Dockerfile has no FROM line with oven/bun:<version>"; exit 1; }
+        echo "Bun $v (from the Dockerfile)"
+        echo "version=$v" >> "$GITHUB_OUTPUT"
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version: ${{ steps.version.outputs.version }}
+        no-cache: ${{ inputs.no-cache }}

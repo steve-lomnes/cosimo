@@ -17,21 +17,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      # CI, release binaries and the image must build with the same Bun (#29).
-      - name: Check .bun-version matches the Dockerfile
-        run: |
-          set -euo pipefail
-          want=$(tr -d '[:space:]' < .bun-version)
-          got=$(sed -nE 's|^FROM .*oven/bun:([0-9][^@ ]*)[@ ].*|\1|p' Dockerfile | head -1)
-          echo ".bun-version: $want, Dockerfile: ${got:-none}"
-          [ "$want" = "$got" ] || {
-            echo "::error::.bun-version ($want) does not match the Dockerfile's oven/bun:${got:-?}; update both together"
-            exit 1
-          }
       - run: bun run lint
       - run: bun run typecheck
 
@@ -46,9 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Start libSQL server (sqld with namespaces)
         if: matrix.db == 'sqld'
@@ -76,9 +61,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - run: bun test packages/core/src/chain.vectors.test.ts packages/core/src/canonical.test.ts
       - name: Parse install.ps1
@@ -95,9 +78,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - run: bun run build:web
       - run: bun run --cwd apps/server build:binary
@@ -134,9 +115,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - run: bun run build:web
       - run: bunx playwright install --with-deps chromium
@@ -156,9 +135,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - run: bun audit --audit-level=high
       - uses: google/osv-scanner-action/osv-scanner-action@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0

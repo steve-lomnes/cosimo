@@ -95,7 +95,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-bun
+      - uses: $/.github/actions/setup-bun
         with:
           no-cache: true
       # --os/--cpu '*' installs every platform's optional deps, so each target's

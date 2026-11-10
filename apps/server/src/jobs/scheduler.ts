@@ -83,8 +83,12 @@ export class Scheduler {
     await this.#running;
   }
 
-  async lastRun(job: string, orgId: string | null) {
-    const row = await this.ctx.system.db
+  /**
+   * The last successful run of `job` for `orgId`. This runs for every job and org on every tick, so
+   * it must stay an index seek (`job_runs_last_ok_idx`), not a walk over the job's history.
+   */
+  lastRunQuery(job: string, orgId: string | null) {
+    return this.ctx.system.db
       .select({ startedAt: system.jobRuns.startedAt })
       .from(system.jobRuns)
       .where(
@@ -95,8 +99,11 @@ export class Scheduler {
         ),
       )
       .orderBy(desc(system.jobRuns.startedAt))
-      .limit(1)
-      .get();
+      .limit(1);
+  }
+
+  async lastRun(job: string, orgId: string | null) {
+    const row = await this.lastRunQuery(job, orgId).get();
     return row ? new Date(row.startedAt) : null;
   }
 
@@ -105,8 +112,11 @@ export class Scheduler {
     if (this.#running) return this.#running;
     this.#running = (async () => {
       try {
+        // One org listing per tick, not one per org-scoped job.
+        let orgIds: string[] | null = null;
         for (const j of jobs) {
-          const targets = j.scope === "org" ? (await this.ctx.orgs.list()).map((o) => o.id) : [null];
+          if (j.scope === "org" && !orgIds) orgIds = (await this.ctx.orgs.list()).map((o) => o.id);
+          const targets = j.scope === "org" ? orgIds! : [null];
           for (const orgId of targets) {
             if (!(await j.due(now, await this.lastRun(j.name, orgId), this.ctx, orgId))) continue;
             await this.runJob(j, orgId);

@@ -240,5 +240,10 @@ export const jobRuns = sqliteTable(
     status: text("status", { enum: ["running", "ok", "error"] }).notNull(),
     detail: text("detail"),
   },
-  (t) => [index("job_runs_job_idx").on(t.job, t.startedAt)],
+  (t) => [
+    index("job_runs_job_idx").on(t.job, t.startedAt),
+    // Covers the scheduler's per-tick "last successful run" lookup for every job and org. Without
+    // it, an org with no recent ok run walks every row that job has ever recorded, once a minute.
+    index("job_runs_last_ok_idx").on(t.job, t.status, t.orgId, t.startedAt),
+  ],
 );

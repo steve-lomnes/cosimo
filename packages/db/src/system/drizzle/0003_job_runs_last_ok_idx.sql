@@ -1,0 +1,1 @@
+CREATE INDEX `job_runs_last_ok_idx` ON `job_runs` (`job`,`status`,`org_id`,`started_at`);

@@ -4,7 +4,7 @@
  * restarts and shows in the admin screen. Per-org jobs run once for every active org.
  */
 import { newId, system } from "@cosimo/db";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { AppContext } from "../context.ts";
 
 export interface JobDef {
@@ -59,6 +59,28 @@ export function weekly(weekday: () => number, hour = 3) {
     if (now.getUTCDay() !== weekday() || now.getUTCHours() < hour) return false;
     return !last || now.getTime() - last.getTime() > 24 * 3_600_000;
   };
+}
+
+/** Run history older than this is pruned (each job's and org's newest ok run is always kept). */
+export const JOB_RUN_RETENTION_DAYS = 90;
+
+/**
+ * Housekeeping: delete `job_runs` older than the retention window, except each (job, org) pair's
+ * newest ok run, which the scheduler's last-run lookup needs however old it is. Returns the count.
+ */
+export async function pruneJobRuns(ctx: AppContext, now = new Date()): Promise<number> {
+  const cutoff = new Date(now.getTime() - JOB_RUN_RETENTION_DAYS * 86_400_000).toISOString();
+  const res = await ctx.system.write(async (tx) =>
+    tx.run(sql`
+      delete from job_runs
+      where started_at < ${cutoff}
+        and not (status = 'ok' and not exists (
+          select 1 from job_runs n
+          where n.job = job_runs.job and n.status = 'ok' and n.org_id is job_runs.org_id
+            and n.started_at > job_runs.started_at
+        ))`),
+  );
+  return res.rowsAffected;
 }
 
 export class Scheduler {

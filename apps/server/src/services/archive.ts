@@ -7,8 +7,11 @@
  */
 import { createWriteStream, existsSync, readFileSync, rmSync } from "node:fs";
 import { sha256Hex } from "@cosimo/core";
-import { type Client, createClient } from "@libsql/client";
+import { type Client, createClient, type ResultSet } from "@libsql/client";
 import { strToU8, unzipSync, Zip, ZipDeflate, ZipPassThrough } from "fflate";
+
+/** Name of the helper column that carries the rowid for keyset paging. */
+const ROWID_COL = "__cosimo_rowid";
 
 export async function snapshotDb(client: Client, url: string, out: string): Promise<void> {
   if (existsSync(out)) rmSync(out);
@@ -20,7 +23,7 @@ export async function snapshotDb(client: Client, url: string, out: string): Prom
 }
 
 /** Copy every table of a remote database into a new local SQLite file. */
-async function copyRemote(src: Client, out: string) {
+export async function copyRemote(src: Client, out: string) {
   const dst = createClient({ url: `file:${out}` });
   try {
     // Rows are copied table by table, not in dependency order.
@@ -36,20 +39,27 @@ async function copyRemote(src: Client, out: string) {
     for (const r of rows.filter((x) => x.type === "table")) await dst.execute(r.sql);
     for (const t of rows.filter((x) => x.type === "table")) {
       const q = `"${t.name.replace(/"/g, '""')}"`;
-      for (let offset = 0; ; offset += 500) {
-        const rs = await src.execute(`select * from ${q} order by rowid limit 500 offset ${offset}`);
+      // Keyset paging on rowid: an OFFSET makes the server re-read every skipped row, which on a
+      // remote database is O(N^2) rows read for a table of N rows.
+      let last: number | bigint | null = null;
+      for (;;) {
+        const rs: ResultSet = await src.execute({
+          sql: `select rowid as "${ROWID_COL}", * from ${q} ${last === null ? "" : "where rowid > ? "}order by rowid limit 500`,
+          args: last === null ? [] : [last],
+        });
         if (!rs.rows.length) break;
-        const cols = rs.columns;
+        const cols = rs.columns.slice(1);
         const placeholders = cols.map(() => "?").join(", ");
         const colList = cols.map((c) => `"${c.replace(/"/g, '""')}"`).join(", ");
         await dst.batch(
           rs.rows.map((row) => ({
             sql: `insert into ${q} (${colList}) values (${placeholders})`,
-            args: cols.map((_, i) => row[i] ?? null),
+            args: cols.map((_, i) => row[i + 1] ?? null),
           })),
           "write",
         );
         if (rs.rows.length < 500) break;
+        last = rs.rows[rs.rows.length - 1]![0] as number | bigint;
       }
     }
     for (const r of rows.filter((x) => x.type !== "table")) await dst.execute(r.sql);
@@ -97,13 +107,18 @@ export async function copyToRemote(src: Client, dst: Client, chunk = 200): Promi
   await dst.migrate(tables.map((t) => t.sql));
   for (const t of tables) {
     const q = quote(t.name);
-    for (let offset = 0; ; offset += chunk) {
-      const rs = await src.execute(`select * from ${q} order by rowid limit ${chunk} offset ${offset}`);
+    let last: number | bigint | null = null;
+    for (;;) {
+      const rs: ResultSet = await src.execute({
+        sql: `select rowid as "${ROWID_COL}", * from ${q} ${last === null ? "" : "where rowid > ? "}order by rowid limit ${chunk}`,
+        args: last === null ? [] : [last],
+      });
       if (!rs.rows.length) break;
-      const cols = rs.columns;
+      const cols = rs.columns.slice(1);
       const sql = `insert into ${q} (${cols.map(quote).join(", ")}) values (${cols.map(() => "?").join(", ")})`;
-      await dst.migrate(rs.rows.map((row) => ({ sql, args: cols.map((_, i) => row[i] ?? null) })));
+      await dst.migrate(rs.rows.map((row) => ({ sql, args: cols.map((_, i) => row[i + 1] ?? null) })));
       if (rs.rows.length < chunk) break;
+      last = rs.rows[rs.rows.length - 1]![0] as number | bigint;
     }
   }
   const rest = schema.filter((x) => x.type !== "table");

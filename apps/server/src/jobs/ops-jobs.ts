@@ -2,7 +2,7 @@
 
 import { pruneIdempotencyKeys } from "../http/idempotency.ts";
 import { createBackup } from "../services/backup.ts";
-import { daily, dailyAt, registerJob } from "./scheduler.ts";
+import { daily, dailyAt, pruneJobRuns, registerJob } from "./scheduler.ts";
 
 export function registerOpsJobs(backupTime: () => string, enabled: () => boolean) {
   registerJob({
@@ -20,7 +20,8 @@ export function registerOpsJobs(backupTime: () => string, enabled: () => boolean
     due: daily(3),
     async run(ctx) {
       await pruneIdempotencyKeys(ctx);
-      return "ok";
+      const n = await pruneJobRuns(ctx);
+      return `ok; pruned ${n} job run(s)`;
     },
   });
 }

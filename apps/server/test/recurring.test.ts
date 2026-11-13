@@ -3,7 +3,9 @@
  * daily job, with catch-up, review rules, lock dates, the email outbox, and proposals.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { renderPeriodText } from "@cosimo/core";
 import { org as dbOrg } from "@cosimo/db";
+import { addDays, addMonths, today } from "@cosimo/shared";
 import { eq } from "drizzle-orm";
 import { runRecurringTemplates } from "../src/jobs/document-jobs.ts";
 import type { Mailer, SentMail } from "../src/services/mailer.ts";
@@ -278,14 +280,15 @@ describe(`recurring templates (${DB_MODE})`, () => {
     );
     const run = (body: Record<string, unknown> = {}) =>
       owner.json("POST", `${o.base}/recurring-templates/${t.id}/run`, body);
-    // Not due yet, so a plain run creates nothing; early creates the next one, dated as scheduled.
+    // Not due yet, so a plain run creates nothing; early creates the next one, dated today.
     expect((await run()).body.created).toBe(0);
     const e1 = await run({ early: true });
     expect(e1.body).toMatchObject({ created: 1, error: null });
     expect(e1.body.template.next_date).toBe("2030-02-28");
     const first = (await detail(o, t.id)).runs[0];
     const draft = (await owner.json("GET", `${o.base}/entries/${first.doc_id}`)).body;
-    expect(draft).toMatchObject({ status: "draft", date: "2030-01-31" });
+    expect(draft).toMatchObject({ status: "draft", date: today() });
+    expect(first.scheduled_date).toBe("2030-01-31");
 
     const paused = await owner.json("POST", `${o.base}/recurring-templates/${t.id}/pause`, {});
     expect(paused.body.status).toBe("paused");
@@ -448,5 +451,76 @@ describe(`recurring templates (${DB_MODE})`, () => {
     const d = await detail(o, t.id);
     const inv = (await owner.json("GET", `${o.base}/invoices/${d.runs[0].doc_id}`)).body;
     expect(inv).toMatchObject({ terms: "Net 10", due_date: "2026-05-11" });
+  });
+
+  test("an early run is dated today and keeps the scheduled date on the run", async () => {
+    const o = await freshOrg("Early Bill Co");
+    const start = addDays(today(), 30);
+    const t = await create(o, {
+      kind: "bill",
+      name: "Rent",
+      contact_id: o.vendor,
+      run_mode: "post",
+      schedule: { unit: "month", interval: 1, start_date: start },
+      template: {
+        bill_number: "RENT-{year}-{month}",
+        lines: [{ description: "Rent", amount: 1000, account_id: o.acct["6130"] }],
+      },
+    });
+    const run = (body: Record<string, unknown> = {}) =>
+      owner.json("POST", `${o.base}/recurring-templates/${t.id}/run`, body);
+    const e1 = await run({ early: true });
+    expect(e1.body).toMatchObject({ created: 1, error: null });
+    expect(e1.body.template.next_date).toBe(addMonths(start, 1));
+    const first = (await detail(o, t.id)).runs[0];
+    expect(first.scheduled_date).toBe(start);
+    const bill = (await owner.json("GET", `${o.base}/bills/${first.doc_id}`)).body;
+    expect(bill).toMatchObject({
+      status: "open",
+      issue_date: today(),
+      due_date: addDays(today(), 30),
+      bill_number: renderPeriodText("RENT-{year}-{month}", start),
+    });
+    // A plain run creates nothing, and a second early run creates the following occurrence.
+    expect((await run()).body.created).toBe(0);
+    expect((await run({ early: true })).body.created).toBe(1);
+    const runs = (await detail(o, t.id)).runs;
+    expect(runs.map((r: any) => r.scheduled_date).sort()).toEqual([start, addMonths(start, 1)]);
+  });
+
+  test("an early invoice run is issued today and due due_days later", async () => {
+    const o = await freshOrg("Early Invoice Co");
+    const t = await create(
+      o,
+      invoiceTemplate(o, 50_000, {
+        run_mode: "post",
+        schedule: { unit: "month", interval: 1, start_date: addDays(today(), 20) },
+        template: {
+          due_days: 14,
+          lines: [
+            { description: "Retainer", quantity_milli: 1000, unit_price: 50_000, account_id: o.acct["4000"] },
+          ],
+        },
+      }),
+    );
+    const r = await owner.json("POST", `${o.base}/recurring-templates/${t.id}/run`, { early: true });
+    expect(r.body.created).toBe(1);
+    const run = (await detail(o, t.id)).runs[0];
+    const inv = (await owner.json("GET", `${o.base}/invoices/${run.doc_id}`)).body;
+    expect(inv).toMatchObject({ issue_date: today(), due_date: addDays(today(), 14) });
+  });
+
+  test("an early run of an occurrence already due keeps the scheduled date", async () => {
+    const o = await freshOrg("Early Due Co");
+    const start = addDays(today(), -10);
+    const t = await create(
+      o,
+      entryTemplate(o, { schedule: { unit: "month", interval: 1, start_date: start, max_occurrences: 2 } }),
+    );
+    const r = await owner.json("POST", `${o.base}/recurring-templates/${t.id}/run`, { early: true });
+    expect(r.body.created).toBe(1);
+    const run = (await detail(o, t.id)).runs[0];
+    const entry = (await owner.json("GET", `${o.base}/entries/${run.doc_id}`)).body;
+    expect(entry.date).toBe(start);
   });
 });

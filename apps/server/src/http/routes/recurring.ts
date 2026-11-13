@@ -420,7 +420,7 @@ export function recurringRoutes() {
       tags: TAGS,
       summary: "Run a recurring template now",
       description:
-        "Without `early`, creates what is due by today (retrying after an error). With `early`, creates the next occurrence now, dated its scheduled date. Posting still follows review rules, and auto-send invoices are emailed afterwards.",
+        "Without `early`, creates what is due by today (retrying after an error). With `early`, creates the next occurrence now, dated today when it is scheduled later (period text such as {month} still follows the scheduled date). Posting still follows review rules, and auto-send invoices are emailed afterwards.",
       security: bearerSecurity,
       request: { params: TemplateParams, body: jsonBody(z.object({ early: z.boolean().optional() })) },
       responses: {

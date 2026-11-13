@@ -16372,7 +16372,7 @@ export interface paths {
         put?: never;
         /**
          * Run a recurring template now
-         * @description Without `early`, creates what is due by today (retrying after an error). With `early`, creates the next occurrence now, dated its scheduled date. Posting still follows review rules, and auto-send invoices are emailed afterwards.
+         * @description Without `early`, creates what is due by today (retrying after an error). With `early`, creates the next occurrence now, dated today when it is scheduled later (period text such as {month} still follows the scheduled date). Posting still follows review rules, and auto-send invoices are emailed afterwards.
          */
         post: {
             parameters: {

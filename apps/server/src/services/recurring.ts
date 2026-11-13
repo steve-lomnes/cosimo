@@ -650,8 +650,9 @@ async function advanceTx(tx: OrgTx, t: TemplateRow, date: string) {
 
 /**
  * Create the template's next occurrence, if it is due by `asOf` (or with `early`, whenever it
- * falls). Returns null when nothing is due. When a run already exists for that date, only the
- * schedule advances: that is what makes reruns and concurrent runs safe.
+ * falls; a future occurrence run early is dated `asOf`, #84). Returns null when nothing is due.
+ * When a run already exists for that date, only the schedule advances: that is what makes reruns
+ * and concurrent runs safe.
  */
 export async function runOccurrenceTx(
   tx: OrgTx,
@@ -664,6 +665,8 @@ export async function runOccurrenceTx(
   const date = t.nextDate;
   if (t.status !== "active" || !date) return null;
   if (!opts.early && date > asOf) return null;
+  // An early run of a future occurrence is dated today; the schedule still keeps the scheduled date.
+  const issueDate = opts.early && date > asOf ? asOf : date;
   const existing = await runOn(tx, t.id, date);
   if (existing) {
     await advanceTx(tx, t, date);
@@ -671,26 +674,27 @@ export async function runOccurrenceTx(
   }
   const { body } = await validateTemplateTx(tx, inputOf(t), { run: true });
   const s = await settingsRow(tx);
-  if (s.hardLockDate && date <= s.hardLockDate)
+  if (s.hardLockDate && issueDate <= s.hardLockDate)
     throw unprocessable(
-      `The books are closed through ${s.hardLockDate} (hard lock), so the ${date} run can't be created. Skip this date, or ask an owner to move the lock.`,
+      `The books are closed through ${s.hardLockDate} (hard lock), so the ${issueDate} run can't be created. Skip this date, or ask an owner to move the lock.`,
       "hard_locked",
     );
+  // Period text follows the scheduled date: running December's rent early still says "December".
   const r = (v: string | null | undefined) => (v ? renderPeriodText(v, date) : v);
   const posts = t.runMode !== "draft";
   let docId: string;
   if (t.kind === "invoice") {
-    const due = body.due_days != null ? addDays(date, body.due_days) : null;
+    const due = body.due_days != null ? addDays(issueDate, body.due_days) : null;
     const terms = r(body.terms) ?? null;
     // The due date wins over terms that disagree with it (templates saved before terms were checked).
-    const keepTerms = due ? termsAgree(date, terms, due) : parseTerms(terms) !== "on_due_date";
+    const keepTerms = due ? termsAgree(issueDate, terms, due) : parseTerms(terms) !== "on_due_date";
     const inv = await createInvoiceTx(
       tx,
       orgId,
       SYSTEM_ACTOR,
       {
         customer_id: t.contactId!,
-        issue_date: date,
+        issue_date: issueDate,
         due_date: due,
         terms: keepTerms ? terms : null,
         memo: r(body.memo) ?? null,
@@ -708,8 +712,8 @@ export async function runOccurrenceTx(
       {
         vendor_id: t.contactId!,
         bill_number: r(body.bill_number) ?? null,
-        issue_date: date,
-        due_date: addDays(date, body.due_days ?? 30),
+        issue_date: issueDate,
+        due_date: addDays(issueDate, body.due_days ?? 30),
         memo: r(body.memo) ?? null,
         lines: body.lines.map((l) => ({ ...l, description: r(l.description) ?? "Item" })),
         draft: !posts,
@@ -719,7 +723,7 @@ export async function runOccurrenceTx(
     docId = bill.id;
   } else {
     const entry = {
-      date,
+      date: issueDate,
       memo: r(body.memo) || t.name,
       lines: body.lines.map((l) => ({
         accountId: l.account_id,
@@ -749,7 +753,13 @@ export async function runOccurrenceTx(
     action: "recurring_template.run",
     targetType: "recurring_template",
     targetId: t.id,
-    after: { scheduled_date: date, doc_type: t.kind, doc_id: docId, early: Boolean(opts.early) },
+    after: {
+      scheduled_date: date,
+      issue_date: issueDate,
+      doc_type: t.kind,
+      doc_id: docId,
+      early: Boolean(opts.early),
+    },
   });
   const run = (await tx.select().from(org.recurringRuns).where(eq(org.recurringRuns.id, runId)).get())!;
   return { run, created: true };

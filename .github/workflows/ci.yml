@@ -118,7 +118,13 @@ jobs:
       - uses: $/.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - run: bun run build:web
-      - run: bunx playwright install --with-deps chromium
+      # The runner image ships Chrome with its libraries; installing Playwright's Chromium with
+      # --with-deps spent ~4 min in apt (#105).
+      - name: Use the runner's Google Chrome
+        run: |
+          set -euo pipefail
+          google-chrome --version
+          echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE=$(command -v google-chrome)" >> "$GITHUB_ENV"
       - run: bun run e2e
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

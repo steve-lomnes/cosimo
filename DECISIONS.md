@@ -306,6 +306,10 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   contribution, a customer invoice, and a few uncategorized transactions for bank review. It goes
   through the normal services, so it is chained and audited. The owner-entered contribution and
   invoice post directly instead of waiting behind the review threshold. Running init again does not add a second copy.
+- **CI's e2e uses the runner image's Google Chrome** through `PLAYWRIGHT_CHROMIUM_EXECUTABLE`, since
+  `playwright install --with-deps chromium` could spend minutes in apt depending on the Ubuntu mirror
+  (#105). The suite has no screenshot assertions, so stable Chrome in place of Playwright's Chromium
+  build changes no expected output.
 
 ### After the build
 - **"Bank review" is now "Categorize"** (Banking → Categorize, `/banking/categorize`; the old URL

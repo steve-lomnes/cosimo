@@ -2,7 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 const PORT = Number(process.env.COSIMO_E2E_PORT ?? 8799);
 
-// Pre-installed browser in environments that can't download Playwright's pinned build.
+// A pre-installed browser: the runner's Google Chrome in CI (#105), or one in an environment that
+// can't download Playwright's pinned build.
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
 
 export default defineConfig({

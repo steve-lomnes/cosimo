@@ -85,8 +85,9 @@ test("a planned item shows in its bucket and lowers Safe to draw; Didn't happen 
   await expect(page.getByLabel("Amount")).toHaveValue(before.toFixed(2));
   await page.getByRole("button", { name: "Cancel" }).click();
 
-  // Archive the item so later tests see no leftovers.
-  await page.getByRole("button", { name: "Archive Equipment lease" }).click();
+  // Remove the item (after confirming) so later tests see no leftovers.
+  page.once("dialog", (d) => d.accept());
+  await page.getByRole("button", { name: "Remove Equipment lease" }).click();
   await expect(page.getByRole("cell", { name: "Equipment lease", exact: true })).toHaveCount(0);
 });
 
@@ -202,6 +203,18 @@ test("a reserve set up in the form shows its due date in the forecast and holds 
   await expect(card.getByText("Paid personally")).toBeVisible();
   await page.getByRole("tab", { name: "Forecast" }).click();
   await expect(safe).toHaveText(usd(2850));
+
+  // Plan a draw: part of it can pay out the reserve, and "How it books" shows both entries.
+  await page.getByRole("button", { name: "Plan a draw" }).click();
+  const draw = page.getByRole("dialog");
+  await draw.getByLabel("Amount", { exact: true }).fill("500");
+  await draw.getByLabel("Pay out for Federal").fill("100");
+  const books = draw.getByRole("region", { name: "How it books" });
+  await expect(books).toContainText("Tax payment: Owner taxes, Federal");
+  await expect(books).toContainText("Ordinary owner draw");
+  await draw.getByLabel("Pay out for Federal").fill("600");
+  await expect(draw.getByRole("button", { name: "Propose draw" })).toBeDisabled();
+  await draw.getByRole("button", { name: "Cancel" }).click();
 });
 
 test("the transaction list: search anywhere, change a planned item in its row, click away, and read the chart", async ({
@@ -252,6 +265,53 @@ test("the transaction list: search anywhere, change a planned item in its row, c
   await page.keyboard.press("End");
   await expect(page.getByRole("status").filter({ hasText: "Workshop fee" })).toBeVisible();
 
-  for (const n of ["Studio rent", "Workshop fee"])
-    await page.getByRole("button", { name: `Archive ${n}` }).click();
+  for (const n of ["Studio rent", "Workshop fee"]) {
+    page.once("dialog", (d) => d.accept());
+    await page.getByRole("button", { name: `Remove ${n}` }).click();
+    await expect(page.getByRole("button", { name: `Remove ${n}` })).toHaveCount(0);
+  }
+});
+
+test("an invoice row shows its due date; the assumptions dialog is filled in and moves the expected date", async ({
+  page,
+}) => {
+  await signIn(page);
+  // Its own org: an open invoice must not change the shared org's receivables.
+  const made = await api(page, "POST", "/api/v1/orgs", { name: "Forecast Due E2E LLC" });
+  expect(made.status).toBeLessThan(300);
+  const id = made.body.id as string;
+  const accts = await api(page, "GET", `/api/v1/orgs/${id}/accounts`);
+  const code = (c: string) => accts.body.data.find((a: { code: string }) => a.code === c).id;
+  const customer = await api(page, "POST", `/api/v1/orgs/${id}/contacts`, {
+    kind: "customer",
+    name: "Globex",
+  });
+  const due = iso(new Date(Date.now() + 10 * 86_400_000));
+  const inv = await api(page, "POST", `/api/v1/orgs/${id}/invoices`, {
+    customer_id: customer.body.id,
+    issue_date: iso(new Date()),
+    due_date: due,
+    lines: [{ description: "Work", quantity_milli: 1000, unit_price: 40_000, account_id: code("4000") }],
+  });
+  expect(inv.status).toBe(201);
+  expect(
+    (await api(page, "POST", `/api/v1/orgs/${id}/invoices/${inv.body.id}/finalize`, {})).status,
+  ).toBeLessThan(300);
+
+  await page.goto(`/o/${id}/forecast`);
+  const list = page.locator("section", { has: page.getByRole("heading", { name: "Transactions" }) });
+  const row = list.getByRole("row", { name: /Invoice .*Globex/ });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText("Due ");
+  await expect(row).not.toContainText("expected");
+
+  await page.getByRole("button", { name: "Assumptions…" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Days customers pay after the due date")).toHaveValue("0");
+  await expect(dialog.getByLabel("Days you pay bills after the due date")).toHaveValue("0");
+  await expect(dialog.getByText("Default: 0 days").first()).toBeVisible();
+  await dialog.getByLabel("Days customers pay after the due date").fill("3");
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(row).toContainText("expected 3 days late");
 });

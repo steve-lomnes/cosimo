@@ -1,12 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  applyOverrides,
-  bucketRanges,
-  buildForecast,
-  type Flow,
-  itemOccurrences,
-  splitLate,
-} from "./forecast.ts";
+import { applyOverrides, bucketRanges, buildForecast, type Flow, itemOccurrences } from "./forecast.ts";
 
 const flow = (id: string, date: string, amount: number, extra: Partial<Flow> = {}): Flow => ({
   id,
@@ -44,13 +37,7 @@ describe("bucketRanges", () => {
   });
 });
 
-describe("splitLate and occurrences", () => {
-  test("the late share is rounded and the remainder stays", () => {
-    expect(splitLate(1001, 50)).toEqual({ late: 501, onTime: 500 });
-    expect(splitLate(999, 33)).toEqual({ late: 330, onTime: 669 });
-    expect(splitLate(500, 0)).toEqual({ late: 0, onTime: 500 });
-  });
-
+describe("occurrences", () => {
   test("a one-off counts only inside the range, a schedule lists its dates", () => {
     const once = { unit: null, interval: 1, start_date: "2026-12-01" } as const;
     expect(itemOccurrences(once, "2026-11-01", "2026-12-01")).toEqual(["2026-12-01"]);
@@ -81,6 +68,16 @@ describe("applyOverrides", () => {
       ["b", "2026-11-23"],
       ["c", "2026-11-13"],
     ]);
+  });
+
+  test("a shift moves the expected date and keeps the due date", () => {
+    const flows = [
+      flow("i", "2026-12-05", 100, { target: { type: "invoice", id: "i1" }, due_date: "2026-11-30" }),
+    ];
+    const [out] = applyOverrides(flows, [
+      { target_type: "invoice", target_id: "i1", action: "shift", shift_days: 3 },
+    ]);
+    expect(out).toMatchObject({ date: "2026-12-08", due_date: "2026-11-30" });
   });
 
   test("a dated override matches only that date", () => {

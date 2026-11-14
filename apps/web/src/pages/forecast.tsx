@@ -1,6 +1,7 @@
+import { DEFAULT_ASSUMPTIONS } from "@cosimo/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
 import {
@@ -25,6 +26,7 @@ import {
 } from "../components/ui";
 import { useBankAccounts } from "../lib/banking";
 import {
+  dueNote,
   FIRMNESS_LABEL,
   type Forecast,
   type ForecastAttention,
@@ -44,6 +46,7 @@ import { flowMatches, parseQuery } from "../lib/forecast-search";
 import { centsToDecimal, fmtDate, money, todayIso, tryParseCents } from "../lib/format";
 import { useAccounts } from "../lib/ledger";
 import { useOrgId, useRole } from "../lib/org";
+import { useInvalidateReserves, useReserves, useReserveViews } from "../lib/reserves";
 import { ContactPicker } from "./invoices";
 import { ForecastTabs } from "./reserves";
 
@@ -249,7 +252,14 @@ export function ForecastPage() {
           }}
         />
       )}
-      {dialog?.kind === "assumptions" && current && <AssumptionsDialog scenario={current} onClose={close} />}
+      {dialog?.kind === "assumptions" && current && (
+        <AssumptionsDialog
+          scenario={current}
+          baseline={baseline}
+          currency={forecast.data?.currency ?? "USD"}
+          onClose={close}
+        />
+      )}
       {dialog?.kind === "item" && <ItemDialog item={dialog.item} scenarioId={scenarioId} onClose={close} />}
       {dialog?.kind === "draw" && f && <DrawDialog f={f} scenarioId={scenarioId} onClose={close} />}
     </>
@@ -734,65 +744,72 @@ function TransactionList({
   return (
     <Card title="Transactions">
       <div className="mb-3 space-y-2">
-        <Input
-          id="forecast-search"
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search: a name, customer, amount, date, or type. Try “rent”, “dec”, “>1000”"
-          aria-label="Search forecast transactions"
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setQuery("");
-          }}
-        />
-        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filters">
-          {(["all", "in", "out"] as const).map((d) => (
-            <button
-              key={d}
-              type="button"
-              aria-pressed={dir === d}
-              className={chipBtn(dir === d)}
-              onClick={() => setDir(d)}
-            >
-              {d === "all" ? "All" : d === "in" ? "Money in" : "Money out"}
-            </button>
-          ))}
-          <span aria-hidden className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
-          {SOURCE_FILTERS.filter((s) => present.has(s)).map((s) => (
-            <button
-              key={s}
-              type="button"
-              aria-pressed={sources.has(s)}
-              className={chipBtn(sources.has(s))}
-              onClick={() =>
-                setSources((cur) => {
-                  const next = new Set(cur);
-                  if (!next.delete(s)) next.add(s);
-                  return next;
-                })
-              }
-            >
-              {SOURCE_CHIP[s]}
-            </button>
-          ))}
-          {filtering && (
-            <button
-              type="button"
-              className="ml-1 text-xs text-zinc-500 underline hover:text-zinc-800 dark:hover:text-zinc-200"
-              onClick={() => {
-                setQuery("");
-                setDir("all");
-                setSources(new Set());
-              }}
-            >
-              Clear
-            </button>
-          )}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Input
+            id="forecast-search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search"
+            title="A name, customer, amount, date, or type, such as “rent”, “dec”, “due nov”, or “>1000”. Press / to search, Esc to clear."
+            aria-label="Search forecast transactions"
+            className="sm:min-w-40 sm:flex-1"
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setQuery("");
+            }}
+          />
+          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filters">
+            {(["all", "in", "out"] as const).map((d) => (
+              <button
+                key={d}
+                type="button"
+                aria-pressed={dir === d}
+                className={chipBtn(dir === d)}
+                onClick={() => setDir(d)}
+              >
+                {d === "all" ? "All" : d === "in" ? "Money in" : "Money out"}
+              </button>
+            ))}
+            <span aria-hidden className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
+            {SOURCE_FILTERS.filter((s) => present.has(s)).map((s) => (
+              <button
+                key={s}
+                type="button"
+                aria-pressed={sources.has(s)}
+                className={chipBtn(sources.has(s))}
+                onClick={() =>
+                  setSources((cur) => {
+                    const next = new Set(cur);
+                    if (!next.delete(s)) next.add(s);
+                    return next;
+                  })
+                }
+              >
+                {SOURCE_CHIP[s]}
+              </button>
+            ))}
+            {filtering && (
+              <button
+                type="button"
+                className="ml-1 text-xs text-zinc-500 underline hover:text-zinc-800 dark:hover:text-zinc-200"
+                onClick={() => {
+                  setQuery("");
+                  setDir("all");
+                  setSources(new Set());
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
         </div>
-        <p className="text-xs text-zinc-500" aria-live="polite">
-          {filtering ? `${hits.length} of ${all.length} · ` : `${all.length} transactions · `}
-          in {money(inTotal, cur)} · out {money(outTotal, cur)}
-          {filtering && " · balances are for the whole forecast"}
+        <p
+          className="text-xs text-zinc-500"
+          aria-live="polite"
+          title={filtering ? "Balances are for the whole forecast." : undefined}
+        >
+          {filtering ? `${hits.length} of ${all.length}` : `${all.length} transactions`} · in{" "}
+          {money(inTotal, cur)} · out {money(outTotal, cur)}
         </p>
       </div>
       {hits.length === 0 ? (
@@ -857,6 +874,9 @@ function TransactionList({
                                     FIRMNESS_LABEL[flow.firmness]}
                                   {flow.days_overdue ? ` · ${flow.days_overdue} days overdue` : ""}
                                 </span>
+                              )}
+                              {flow.due_date && (
+                                <span className="basis-full text-xs text-zinc-500">{dueNote(flow)}</span>
                               )}
                             </button>
                           </td>
@@ -1063,9 +1083,14 @@ function RowEditor({
   return (
     <div className="space-y-2 pt-2">
       <ErrorText error={save.error ?? exclude.error ?? skip.error} />
+      {flow.due_date && (
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          {dueNote(flow)}. Moving the expected date never changes the due date.
+        </p>
+      )}
       <div className="flex flex-wrap items-end gap-3">
         {canDate && (
-          <Field label="Date" className="w-40">
+          <Field label={flow.due_date ? "Expected date" : "Date"} className="w-40">
             {(id) => <Input id={id} type="date" value={date} onChange={(e) => setDate(e.target.value)} />}
           </Field>
         )}
@@ -1197,8 +1222,12 @@ function AttentionPanel({
       </Button>
     );
     const archiveBtn = (
-      <Button size="sm" variant="ghost" onClick={() => archive.mutate(a.item_id!)}>
-        Archive
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => confirmRemove(item?.name ?? "this item") && archive.mutate(a.item_id!)}
+      >
+        Remove
       </Button>
     );
     switch (a.kind) {
@@ -1259,7 +1288,7 @@ function AttentionPanel({
         return (
           <>
             <Button size="sm" variant="secondary" onClick={() => confirm.mutate(a.item_id!)}>
-              Confirm
+              Mark checked
             </Button>
             {edit}
             {archiveBtn}
@@ -1298,7 +1327,7 @@ function AttentionPanel({
 
 const ATTENTION_LABEL: Record<ForecastAttention["kind"], string> = {
   planned_past_due: "Past due",
-  planned_unconfirmed: "Unconfirmed",
+  planned_unconfirmed: "Not checked lately",
   invoice_overdue: "Overdue invoice",
   bank_feed_stale: "Bank feed",
   card_balance: "Card balance",
@@ -1307,6 +1336,14 @@ const ATTENTION_LABEL: Record<ForecastAttention["kind"], string> = {
 };
 
 // ----------------------------------------------------------------------------- planned items
+
+/** Removing a planned item archives it: it stops counting, and links to past occurrences stay. */
+const confirmRemove = (name: string) =>
+  window.confirm(`Remove “${name}” from the forecast? It stops counting; links to past occurrences stay.`);
+
+/** What planned items are, and what marking one checked does. */
+const PLANNED_HINT =
+  "Money you expect that isn't in the books yet. Mark an item checked when you've confirmed it still holds; items unchecked for 60 days appear under Needs attention.";
 
 function ItemsPanel({
   items,
@@ -1355,81 +1392,87 @@ function ItemsPanel({
           one-off purchase.
         </Empty>
       ) : (
-        <Table>
-          <thead>
-            <tr>
-              <th className={th}>Item</th>
-              <th className={th}>When</th>
-              <th className={cx(th, "text-right")}>Amount</th>
-              <th className={cx(th, "hidden sm:table-cell")}>Confirmed</th>
-              <th className={th} />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {items.map((it) => (
-              <tr key={it.id}>
-                <td className={td}>
-                  <span className="font-medium">{it.name}</span>
-                  {it.kind === "draw" && (
-                    <span className="ml-2">
-                      <Badge tone="red">Draw</Badge>
-                    </span>
-                  )}
-                  {scenarioId && it.scenario_id !== scenarioId && (
-                    <span className="ml-2">
-                      <Badge>Baseline</Badge>
-                    </span>
-                  )}
-                  {it.source === "assistant" && (
-                    <span className="ml-2">
-                      <Badge tone="blue">Assistant</Badge>
-                    </span>
-                  )}
-                </td>
-                <td className={cx(td, "min-w-36")}>
-                  {it.schedule_text}
-                  {it.next_date && <div className="text-xs text-zinc-500">Next {fmtDate(it.next_date)}</div>}
-                </td>
-                <td className={cx(td, "text-right")}>
-                  <Amount cents={it.direction === "in" ? it.amount : -it.amount} currency={currency} />
-                </td>
-                <td className={cx(td, "hidden sm:table-cell")}>
-                  {it.last_confirmed_at ? fmtDate(it.last_confirmed_at) : "Never"}
-                </td>
-                <td className={cx(td, "text-right")}>
-                  {canWrite && (
-                    <span className="inline-flex gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => onEdit(it)}
-                        aria-label={`Edit ${it.name}`}
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => confirm.mutate(it.id)}
-                        aria-label={`Confirm ${it.name}`}
-                      >
-                        Confirm
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => archive.mutate(it.id)}
-                        aria-label={`Archive ${it.name}`}
-                      >
-                        Archive
-                      </Button>
-                    </span>
-                  )}
-                </td>
+        <>
+          <p className="mb-3 text-xs text-zinc-500">{PLANNED_HINT}</p>
+          <Table>
+            <thead>
+              <tr>
+                <th className={th}>Item</th>
+                <th className={th}>When</th>
+                <th className={cx(th, "text-right")}>Amount</th>
+                <th className={cx(th, "hidden sm:table-cell")}>Last checked</th>
+                <th className={th} />
               </tr>
-            ))}
-          </tbody>
-        </Table>
+            </thead>
+            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {items.map((it) => (
+                <tr key={it.id}>
+                  <td className={td}>
+                    <span className="font-medium">{it.name}</span>
+                    {it.kind === "draw" && (
+                      <span className="ml-2">
+                        <Badge tone="red">Draw</Badge>
+                      </span>
+                    )}
+                    {scenarioId && it.scenario_id !== scenarioId && (
+                      <span className="ml-2">
+                        <Badge>Baseline</Badge>
+                      </span>
+                    )}
+                    {it.source === "assistant" && (
+                      <span className="ml-2">
+                        <Badge tone="blue">Assistant</Badge>
+                      </span>
+                    )}
+                  </td>
+                  <td className={cx(td, "min-w-36")}>
+                    {it.schedule_text}
+                    {it.next_date && (
+                      <div className="text-xs text-zinc-500">Next {fmtDate(it.next_date)}</div>
+                    )}
+                  </td>
+                  <td className={cx(td, "text-right")}>
+                    <Amount cents={it.direction === "in" ? it.amount : -it.amount} currency={currency} />
+                  </td>
+                  <td className={cx(td, "hidden sm:table-cell")}>
+                    {it.last_confirmed_at ? fmtDate(it.last_confirmed_at) : "Not yet"}
+                  </td>
+                  <td className={cx(td, "text-right")}>
+                    {canWrite && (
+                      <span className="inline-flex gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onEdit(it)}
+                          aria-label={`Edit ${it.name}`}
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => confirm.mutate(it.id)}
+                          aria-label={`Mark ${it.name} checked`}
+                          title="It still holds: the date and amount are right."
+                        >
+                          Mark checked
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => confirmRemove(it.name) && archive.mutate(it.id)}
+                          aria-label={`Remove ${it.name}`}
+                        >
+                          Remove
+                        </Button>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </>
       )}
     </Card>
   );
@@ -1768,19 +1811,106 @@ function CustomWindowDialog({ onClose, onPick }: { onClose: () => void; onPick: 
   );
 }
 
-function AssumptionsDialog({ scenario, onClose }: { scenario: ForecastScenario; onClose: () => void }) {
+type AssumptionKey = keyof typeof DEFAULT_ASSUMPTIONS;
+
+/** One assumption as a sentence with the number in it: "Customers pay [5] days after the due date". */
+function SentenceField({
+  before,
+  after,
+  ariaLabel,
+  value,
+  onChange,
+  inputMode,
+  hint,
+  note,
+  onUseBaseline,
+  error,
+}: {
+  before: string;
+  after: string;
+  ariaLabel: string;
+  value: string;
+  onChange: (v: string) => void;
+  inputMode: "numeric" | "decimal";
+  hint: string;
+  note: string;
+  onUseBaseline: (() => void) | null;
+  error: string | null;
+}) {
+  const id = useId();
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+        <label htmlFor={id}>{before}</label>
+        <Input
+          id={id}
+          inputMode={inputMode}
+          aria-label={ariaLabel}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className={inputMode === "numeric" ? "w-20" : "w-32"}
+        />
+        <span>{after}</span>
+      </div>
+      {error ? (
+        <p className="text-xs text-red-600">{error}</p>
+      ) : (
+        <p className="text-xs text-zinc-500">{hint}</p>
+      )}
+      <p className="text-xs text-zinc-500">
+        {note}
+        {onUseBaseline && (
+          <>
+            {" · "}
+            <button
+              type="button"
+              className="underline hover:text-zinc-800 dark:hover:text-zinc-200"
+              onClick={onUseBaseline}
+            >
+              Use baseline
+            </button>
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Three plain questions, each filled in with the value in effect: the scenario's own, else the
+ * baseline's, else the default. Saving sends null for a value equal to what it would inherit, so a
+ * scenario keeps following the baseline (and the baseline the defaults).
+ */
+function AssumptionsDialog({
+  scenario,
+  baseline,
+  currency,
+  onClose,
+}: {
+  scenario: ForecastScenario;
+  baseline: ForecastScenario | undefined;
+  currency: string;
+  onClose: () => void;
+}) {
   const orgId = useOrgId();
   const invalidate = useInvalidateForecast(orgId);
-  const a = scenario.assumptions;
-  const [lag, setLag] = useState(a.collection_lag_days?.toString() ?? "");
-  const [share, setShare] = useState(a.late_share_pct?.toString() ?? "");
-  const [lateDays, setLateDays] = useState(a.late_days?.toString() ?? "");
-  const [buffer, setBuffer] = useState(a.min_cash_buffer != null ? centsToDecimal(a.min_cash_buffer) : "");
-  const int = (s: string) => (s.trim() === "" ? null : Number(s));
-  const bufferCents = buffer.trim() === "" ? null : tryParseCents(buffer);
-  const bad =
-    [lag, share, lateDays].some((s) => s.trim() !== "" && !Number.isInteger(Number(s))) ||
-    (buffer.trim() !== "" && bufferCents == null);
+  const own = scenario.assumptions;
+  const inherited = (k: AssumptionKey): number =>
+    (scenario.is_baseline ? undefined : baseline?.assumptions[k]) ?? DEFAULT_ASSUMPTIONS[k];
+  const effective = (k: AssumptionKey) => own[k] ?? inherited(k);
+  const [lag, setLag] = useState(String(effective("collection_lag_days")));
+  const [billLag, setBillLag] = useState(String(effective("bill_lag_days")));
+  const [buffer, setBuffer] = useState(centsToDecimal(effective("min_cash_buffer")));
+  const days = (v: string) => {
+    const n = Number(v);
+    return v.trim() !== "" && Number.isInteger(n) && n >= -90 && n <= 365 ? n : null;
+  };
+  const lagN = days(lag);
+  const billLagN = days(billLag);
+  const bufferCents = buffer.trim() === "" ? 0 : tryParseCents(buffer);
+  const bufferBad = bufferCents == null || bufferCents < 0;
+  const bad = lagN == null || billLagN == null || bufferBad;
+  const keep = (k: AssumptionKey, v: number) => (v === inherited(k) ? null : v);
   const save = useMutation({
     mutationFn: () =>
       unwrap(
@@ -1788,10 +1918,9 @@ function AssumptionsDialog({ scenario, onClose }: { scenario: ForecastScenario; 
           params: { path: { orgId, id: scenario.id } },
           body: {
             assumptions: {
-              collection_lag_days: int(lag),
-              late_share_pct: int(share),
-              late_days: int(lateDays),
-              min_cash_buffer: bufferCents,
+              collection_lag_days: keep("collection_lag_days", lagN!),
+              bill_lag_days: keep("bill_lag_days", billLagN!),
+              min_cash_buffer: keep("min_cash_buffer", bufferCents!),
             },
           },
         }),
@@ -1801,7 +1930,17 @@ function AssumptionsDialog({ scenario, onClose }: { scenario: ForecastScenario; 
       onClose();
     },
   });
-  const blank = scenario.is_baseline ? "Default" : "Same as the baseline";
+  const dayText = (n: number) => `${n} day${Math.abs(n) === 1 ? "" : "s"}`;
+  const note = (k: AssumptionKey, text: (n: number) => string) =>
+    `${scenario.is_baseline ? "Default" : "Baseline"}: ${text(inherited(k))}`;
+  // A scenario that sets its own value can go back to following the baseline.
+  const useBaseline = (
+    k: AssumptionKey,
+    current: number | null,
+    set: (v: string) => void,
+    asText: (n: number) => string = String,
+  ) => (!scenario.is_baseline && current !== inherited(k) ? () => set(asText(inherited(k))) : null);
+  const dayError = "Enter whole days from -90 to 365.";
   return (
     <Modal
       open
@@ -1818,55 +1957,49 @@ function AssumptionsDialog({ scenario, onClose }: { scenario: ForecastScenario; 
         </>
       }
     >
-      <div className="space-y-3">
+      <div className="space-y-4">
         <ErrorText error={save.error} />
-        <p className="text-sm text-zinc-500">Leave a field empty to use: {blank.toLowerCase()}.</p>
-        <Field label="Customers pay this many days after the due date" hint="Default 0">
-          {(id) => (
-            <Input
-              id={id}
-              inputMode="numeric"
-              value={lag}
-              onChange={(e) => setLag(e.target.value)}
-              placeholder={blank}
-            />
+        <SentenceField
+          before="Customers pay"
+          after="days after the due date"
+          ariaLabel="Days customers pay after the due date"
+          inputMode="numeric"
+          value={lag}
+          onChange={setLag}
+          hint="Use a negative number if they pay early."
+          note={note("collection_lag_days", dayText)}
+          onUseBaseline={useBaseline("collection_lag_days", lagN, setLag)}
+          error={lagN == null ? dayError : null}
+        />
+        <SentenceField
+          before="You pay bills"
+          after="days after the due date"
+          ariaLabel="Days you pay bills after the due date"
+          inputMode="numeric"
+          value={billLag}
+          onChange={setBillLag}
+          hint="Use a negative number if you pay early."
+          note={note("bill_lag_days", dayText)}
+          onUseBaseline={useBaseline("bill_lag_days", billLagN, setBillLag)}
+          error={billLagN == null ? dayError : null}
+        />
+        <SentenceField
+          before="Keep at least"
+          after="in cash"
+          ariaLabel="Cash to keep on hand"
+          inputMode="decimal"
+          value={buffer}
+          onChange={setBuffer}
+          hint="Your comfortable minimum balance. Safe to draw keeps this much back."
+          note={note("min_cash_buffer", (n) => money(n, currency))}
+          onUseBaseline={useBaseline(
+            "min_cash_buffer",
+            bufferBad ? null : bufferCents,
+            setBuffer,
+            centsToDecimal,
           )}
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Percent of each invoice that pays late" hint="Default 0">
-            {(id) => (
-              <Input
-                id={id}
-                inputMode="numeric"
-                value={share}
-                onChange={(e) => setShare(e.target.value)}
-                placeholder={blank}
-              />
-            )}
-          </Field>
-          <Field label="…this many days later still" hint="Default 30">
-            {(id) => (
-              <Input
-                id={id}
-                inputMode="numeric"
-                value={lateDays}
-                onChange={(e) => setLateDays(e.target.value)}
-                placeholder={blank}
-              />
-            )}
-          </Field>
-        </div>
-        <Field label="Cash buffer to keep on hand" hint="Safe to draw is the low point less this. Default 0.">
-          {(id) => (
-            <Input
-              id={id}
-              inputMode="decimal"
-              value={buffer}
-              onChange={(e) => setBuffer(e.target.value)}
-              placeholder={blank}
-            />
-          )}
-        </Field>
+          error={bufferBad ? "Enter an amount, or 0." : null}
+        />
       </div>
     </Modal>
   );
@@ -2081,6 +2214,21 @@ function ItemDialog({
   );
 }
 
+/** One entry the draw will propose, for the "How it books" preview. */
+interface BookingPreview {
+  key: string;
+  title: string;
+  lines: { side: "Dr" | "Cr"; account: string; amount: number; note?: string }[];
+}
+
+const nameStartsDueTo = (name: string) => name.trim().toLowerCase().startsWith("due to");
+
+/**
+ * Propose an owner draw. Part of it can pay out tax money set aside in a reserve (each its own
+ * reserve payment entry) or pay the owner back for expenses recorded against a "Due to" liability
+ * (in the draw's own entry); the rest is an ordinary Owner Draw. "How it books" shows the entries
+ * before anything is proposed.
+ */
 function DrawDialog({
   f,
   scenarioId,
@@ -2092,14 +2240,147 @@ function DrawDialog({
 }) {
   const orgId = useOrgId();
   const invalidate = useInvalidateForecast(orgId);
+  const invalidateReserves = useInvalidateReserves(orgId);
   const banks = useBankAccounts(orgId);
+  const accounts = useAccounts(orgId, { balances: true });
+  const reserves = useReserves(orgId);
+  const active = (reserves.data ?? []).filter((r) => !r.archived_at);
+  const views = useReserveViews(
+    orgId,
+    active.map((r) => r.id),
+  );
   const cash = (banks.data ?? []).filter((b) => b.is_active && b.kind !== "credit_card");
   const [bankId, setBankId] = useState("");
   const [date, setDate] = useState(todayIso());
   const [amount, setAmount] = useState(centsToDecimal(f.draw_capacity.amount));
   const [memo, setMemo] = useState("");
+  const [payouts, setPayouts] = useState<Record<string, { amount: string; year: number | null }>>({});
+  const [trueUps, setTrueUps] = useState(false);
+  const [dueToId, setDueToId] = useState("");
+  const [reimburse, setReimburse] = useState("");
   const bank = bankId || cash[0]?.id || "";
+  const bankName = cash.find((b) => b.id === bank)?.name ?? "the bank account";
   const cents = tryParseCents(amount);
+  const cur = f.currency;
+
+  const accts = accounts.data ?? [];
+  const nameOf = (id: string | null | undefined) => accts.find((a) => a.id === id)?.name ?? "Account";
+  const ownerDraw = accts.find((a) => a.system_key === "owner_draw")?.name ?? "Owner Draw";
+  // What the business owes the owner: a "Due to" liability's credit balance.
+  const dueTos = accts
+    .filter((a) => a.type === "liability" && a.is_active && nameStartsDueTo(a.name))
+    .map((a) => ({ ...a, owed: -(a.balance ?? 0) }))
+    .filter((a) => a.owed > 0);
+  const dueTo = dueTos.find((a) => a.id === dueToId) ?? dueTos[0];
+  const reimburseCents = !dueTo || reimburse.trim() === "" ? 0 : tryParseCents(reimburse);
+
+  // Each active reserve's parts, with what can be paid out now.
+  const parts = active.flatMap((r, i) => {
+    const v = views[i]?.data;
+    if (!v) return [];
+    return v.parts.map((p) => {
+      const part = r.parts.find((x) => x.id === p.part_id);
+      return {
+        reserve: r,
+        taxYear: v.tax_year,
+        partId: p.part_id,
+        label: p.label,
+        available: r.mode === "book" ? (p.held ?? 0) : p.remaining,
+        trueUpDue: r.mode === "book" ? (p.true_up_due ?? 0) : 0,
+        liability: part?.liability_account_id ?? null,
+      };
+    });
+  });
+  const payoutOf = (partId: string) => {
+    const p = payouts[partId];
+    return !p || p.amount.trim() === "" ? 0 : tryParseCents(p.amount);
+  };
+  const badPayout = parts.some((p) => {
+    const c = payoutOf(p.partId);
+    return c == null || c < 0;
+  });
+  const paid = parts.reduce((t, p) => t + Math.max(0, payoutOf(p.partId) ?? 0), 0);
+  const reimbursed = Math.max(0, reimburseCents ?? 0);
+  const rest = (cents ?? 0) - paid - reimbursed;
+  const overSplit = cents != null && rest < 0;
+  const overOwed = dueTo != null && reimbursed > dueTo.owed;
+  const badReimburse = reimburseCents == null || reimburseCents < 0 || overOwed;
+  const trueUpParts = parts.filter((p) => p.trueUpDue !== 0 && p.liability);
+
+  const preview: BookingPreview[] = [];
+  if (trueUps)
+    for (const p of trueUpParts)
+      preview.push({
+        key: `tu:${p.partId}`,
+        title: `True-up: ${p.reserve.name}, ${p.label}`,
+        lines:
+          p.trueUpDue > 0
+            ? [
+                {
+                  side: "Dr",
+                  account: ownerDraw,
+                  amount: p.trueUpDue,
+                  note: "Sets aside what the rate says",
+                },
+                { side: "Cr", account: nameOf(p.liability), amount: p.trueUpDue },
+              ]
+            : [
+                {
+                  side: "Dr",
+                  account: nameOf(p.liability),
+                  amount: -p.trueUpDue,
+                  note: "Releases what was over",
+                },
+                { side: "Cr", account: ownerDraw, amount: -p.trueUpDue },
+              ],
+      });
+  for (const p of parts) {
+    const c = payoutOf(p.partId) ?? 0;
+    if (c <= 0) continue;
+    const year = payouts[p.partId]?.year ?? p.taxYear;
+    preview.push({
+      key: `pay:${p.partId}`,
+      title: `Tax payment: ${p.reserve.name}, ${p.label} ${year}`,
+      lines:
+        p.reserve.mode === "book"
+          ? [
+              {
+                side: "Dr",
+                account: nameOf(p.liability),
+                amount: c,
+                note: "Clears tax money held for the owner",
+              },
+              { side: "Cr", account: bankName, amount: c },
+            ]
+          : [
+              {
+                side: "Dr",
+                account: p.reserve.charge_account_id ? nameOf(p.reserve.charge_account_id) : ownerDraw,
+                amount: c,
+                note: `Counts as paid toward ${p.label} ${year}`,
+              },
+              { side: "Cr", account: bankName, amount: c },
+            ],
+    });
+  }
+  if (reimbursed > 0 || rest > 0) {
+    const lines: BookingPreview["lines"] = [];
+    if (reimbursed > 0 && dueTo)
+      lines.push({
+        side: "Dr",
+        account: dueTo.name,
+        amount: reimbursed,
+        note: "Pays back expenses you covered personally",
+      });
+    if (rest > 0) lines.push({ side: "Dr", account: ownerDraw, amount: rest, note: "Ordinary owner draw" });
+    lines.push({ side: "Cr", account: bankName, amount: reimbursed + Math.max(0, rest) });
+    preview.push({
+      key: "draw",
+      title: reimbursed > 0 ? "Owner reimbursement and draw" : "Owner draw",
+      lines,
+    });
+  }
+
   const save = useMutation({
     mutationFn: () =>
       unwrap(
@@ -2111,13 +2392,51 @@ function DrawDialog({
             bank_account_id: bank,
             memo: memo.trim() || null,
             scenario_id: scenarioId ?? null,
+            include_true_ups: trueUps || undefined,
+            pay_reserves: parts
+              .filter((p) => (payoutOf(p.partId) ?? 0) > 0)
+              .map((p) => ({
+                part_id: p.partId,
+                tax_year: payouts[p.partId]?.year ?? p.taxYear,
+                amount: payoutOf(p.partId)!,
+              })),
+            reimburse_owner: dueTo && reimbursed > 0 ? { account_id: dueTo.id, amount: reimbursed } : null,
           },
         }),
       ),
-    onSuccess: invalidate,
+    onSuccess: () => Promise.all([invalidate(), invalidateReserves()]),
   });
   const done = save.data;
   const over = cents != null && cents > f.draw_capacity.amount;
+  const proposed = done
+    ? [
+        ...done.true_ups
+          .filter((t) => t.entry_id)
+          .map((t) => ({
+            key: `tu:${t.reserve_id}`,
+            label: `True-up of ${active.find((r) => r.id === t.reserve_id)?.name ?? "a reserve"}`,
+            review: Boolean(t.review_item_id),
+          })),
+        ...done.payments.map((p) => ({
+          key: p.payment.id,
+          label: `Tax payment: ${p.payment.part_label} ${p.payment.tax_year}, ${money(p.payment.amount, cur)}`,
+          review: Boolean(p.review_item_id),
+        })),
+        ...(done.draw
+          ? [
+              {
+                key: "draw",
+                label: `${done.draw.entry.memo ?? "Owner draw"}, ${money(
+                  done.draw.entry.lines.reduce((t, l) => t + Math.max(0, l.amount), 0),
+                  cur,
+                )}`,
+                review: Boolean(done.draw.review),
+              },
+            ]
+          : []),
+      ]
+    : [];
+  const anyReview = proposed.some((p) => p.review);
   return (
     <Modal
       open
@@ -2133,7 +2452,7 @@ function DrawDialog({
             </Button>
             <Button
               loading={save.isPending}
-              disabled={!cents || cents <= 0 || !bank}
+              disabled={!cents || cents <= 0 || !bank || overSplit || badPayout || badReimburse}
               onClick={() => save.mutate()}
             >
               Propose draw
@@ -2147,13 +2466,23 @@ function DrawDialog({
         {done ? (
           <div className="space-y-2 text-sm">
             <Alert kind={done.forecast_snapshot.exceeds_capacity ? "warn" : "success"}>
-              {done.review
-                ? "Proposed. It waits in the review queue until someone approves it."
+              {anyReview
+                ? "Proposed. What waits in review counts once someone approves it."
                 : "Recorded: a review policy approved it."}
               {done.exceeds_capacity &&
-                ` It is more than the ${money(done.forecast_snapshot.draw_capacity.amount, f.currency)} the forecast says is safe to draw.`}
+                ` It is more than the ${money(done.forecast_snapshot.draw_capacity.amount, cur)} the forecast says is safe to draw.`}
             </Alert>
-            {done.review && (
+            <ul className="space-y-1">
+              {proposed.map((p) => (
+                <li key={p.key} className="flex justify-between gap-3">
+                  <span>{p.label}</span>
+                  <span className="whitespace-nowrap text-zinc-500">
+                    {p.review ? "waits in review" : "recorded"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {anyReview && (
               <Link to="/o/$orgId/accounting/review" params={{ orgId }} className="underline">
                 Open the review queue
               </Link>
@@ -2162,8 +2491,8 @@ function DrawDialog({
         ) : (
           <>
             <p className="text-sm text-zinc-500">
-              Safe to draw now: <strong>{money(f.draw_capacity.amount, f.currency)}</strong>. A draw over that
-              is still proposed; the reviewer sees the forecast.
+              Safe to draw now: <strong>{money(f.draw_capacity.amount, cur)}</strong>. A draw over that is
+              still proposed; the reviewer sees the forecast.
             </p>
             <Field label="From bank account">
               {(id) => (
@@ -2192,13 +2521,180 @@ function DrawDialog({
               </Field>
             </div>
             {over && <Alert kind="warn">That is more than the forecast says is safe to draw.</Alert>}
+
+            {parts.length > 0 && (
+              <section className="space-y-2" aria-label="Taxes">
+                <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Taxes</h3>
+                <p className="text-xs text-zinc-500">
+                  Pay part of the draw out as a tax payment from {bankName}. Leave 0 to keep it set aside.
+                </p>
+                {parts.map((p) => {
+                  const c = payoutOf(p.partId);
+                  const year = payouts[p.partId]?.year ?? p.taxYear;
+                  const set = (v: Partial<{ amount: string; year: number | null }>) =>
+                    setPayouts((cur) => ({
+                      ...cur,
+                      [p.partId]: {
+                        amount: cur[p.partId]?.amount ?? "",
+                        year: cur[p.partId]?.year ?? null,
+                        ...v,
+                      },
+                    }));
+                  return (
+                    <div key={p.partId} className="flex flex-wrap items-end gap-3">
+                      <div className="min-w-36 flex-1 text-sm">
+                        <div className="font-medium">
+                          {p.reserve.name}: {p.label}
+                        </div>
+                        <div className="text-xs text-zinc-500">
+                          {p.reserve.mode === "book" ? "Held" : "Still to pay"}: {money(p.available, cur)}
+                        </div>
+                      </div>
+                      <Field
+                        label="Pay out for this"
+                        className="w-32"
+                        error={c == null || c < 0 ? "Enter an amount." : null}
+                      >
+                        {(id) => (
+                          <Input
+                            id={id}
+                            inputMode="decimal"
+                            placeholder="0.00"
+                            aria-label={`Pay out for ${p.label}`}
+                            value={payouts[p.partId]?.amount ?? ""}
+                            onChange={(e) => set({ amount: e.target.value })}
+                          />
+                        )}
+                      </Field>
+                      <Field label="Tax year" className="w-24">
+                        {(id) => (
+                          <Select
+                            id={id}
+                            value={year}
+                            onChange={(e) => set({ year: Number(e.target.value) })}
+                          >
+                            {[p.taxYear, p.taxYear - 1].map((y) => (
+                              <option key={y} value={y}>
+                                {y}
+                              </option>
+                            ))}
+                          </Select>
+                        )}
+                      </Field>
+                    </div>
+                  );
+                })}
+                {trueUpParts.length > 0 && (
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={trueUps} onChange={(e) => setTrueUps(e.target.checked)} />
+                    Book the true-up first
+                    <span className="text-xs text-zinc-500">
+                      (set aside what the rate says for net income to date)
+                    </span>
+                  </label>
+                )}
+              </section>
+            )}
+
+            {dueTo && (
+              <section className="space-y-2" aria-label="Paid back to you">
+                <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Paid back to you</h3>
+                <p className="text-xs text-zinc-500">
+                  Expenses you covered personally (mileage, purchases) that the business owes you back.
+                </p>
+                <div className="flex flex-wrap items-end gap-3">
+                  {dueTos.length > 1 ? (
+                    <Field label="Account" className="min-w-36 flex-1">
+                      {(id) => (
+                        <Select id={id} value={dueTo.id} onChange={(e) => setDueToId(e.target.value)}>
+                          {dueTos.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.name} ({money(a.owed, cur)})
+                            </option>
+                          ))}
+                        </Select>
+                      )}
+                    </Field>
+                  ) : (
+                    <div className="min-w-36 flex-1 text-sm">
+                      <div className="font-medium">{dueTo.name}</div>
+                      <div className="text-xs text-zinc-500">Owed to you: {money(dueTo.owed, cur)}</div>
+                    </div>
+                  )}
+                  <Field
+                    label="Pay back"
+                    className="w-32"
+                    error={
+                      reimburseCents == null || reimburseCents < 0
+                        ? "Enter an amount."
+                        : overOwed
+                          ? `At most ${money(dueTo.owed, cur)}.`
+                          : null
+                    }
+                  >
+                    {(id) => (
+                      <Input
+                        id={id}
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        value={reimburse}
+                        onChange={(e) => setReimburse(e.target.value)}
+                      />
+                    )}
+                  </Field>
+                  <button
+                    type="button"
+                    className="pb-2 text-xs underline hover:text-zinc-800 dark:hover:text-zinc-200"
+                    onClick={() => setReimburse(centsToDecimal(dueTo.owed))}
+                  >
+                    Pay all {money(dueTo.owed, cur)}
+                  </button>
+                </div>
+              </section>
+            )}
+
+            {overSplit && (
+              <Alert kind="error">
+                The tax payments and the pay-back add up to {money(paid + reimbursed, cur)}, more than the
+                draw.
+              </Alert>
+            )}
+            {preview.length > 0 && !overSplit && (
+              <section className="space-y-2" aria-label="How it books">
+                <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">How it books</h3>
+                {preview.map((e) => (
+                  <div key={e.key} className="rounded-md ring-1 ring-zinc-200 dark:ring-zinc-800">
+                    <div className="border-b border-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+                      {e.title}
+                    </div>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {e.lines.map((l, i) => (
+                          <tr key={`${l.side}-${i}`}>
+                            <td className="w-8 px-3 py-1 text-xs text-zinc-500">{l.side}</td>
+                            <td className={cx("py-1", l.side === "Cr" && "pl-4")}>
+                              {l.account}
+                              {l.note && <div className="text-xs text-zinc-500">{l.note}</div>}
+                            </td>
+                            <td className="px-3 py-1 text-right whitespace-nowrap tabular-nums">
+                              {money(l.amount, cur)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </section>
+            )}
+
             <Field label="Memo" hint="Optional">
               {(id) => (
                 <Input
                   id={id}
                   value={memo}
                   onChange={(e) => setMemo(e.target.value)}
-                  placeholder="Owner draw"
+                  placeholder={reimbursed > 0 ? "Owner reimbursement and draw" : "Owner draw"}
                 />
               )}
             </Field>

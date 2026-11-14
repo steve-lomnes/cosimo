@@ -52,7 +52,7 @@ import {
   OrgParams,
   z,
 } from "../openapi.ts";
-import { EntrySchema, submitView } from "./ledger.ts";
+import { SubmitResultSchema, submitView } from "./ledger.ts";
 import { ReservePaymentSchema, trueUpView } from "./reserves.ts";
 
 const tags = ["Forecast"];
@@ -62,9 +62,8 @@ const Periods = z.number().int().min(1).max(MAX_FORECAST_PERIODS);
 
 const AssumptionsSchema = z
   .object({
-    collection_lag_days: z.number().int(),
-    late_share_pct: z.number().int(),
-    late_days: z.number().int(),
+    collection_lag_days: z.number().int().openapi({ description: "Days customers pay after the due date" }),
+    bill_lag_days: z.number().int().openapi({ description: "Days bills are paid after the due date" }),
     min_cash_buffer: Cents,
   })
   .openapi("ForecastAssumptions", {
@@ -72,9 +71,8 @@ const AssumptionsSchema = z
   });
 const AssumptionsPatch = z
   .object({
-    collection_lag_days: z.number().int().min(0).max(365).nullable().optional(),
-    late_share_pct: z.number().int().min(0).max(100).nullable().optional(),
-    late_days: z.number().int().min(0).max(365).nullable().optional(),
+    collection_lag_days: z.number().int().min(-90).max(365).nullable().optional(),
+    bill_lag_days: z.number().int().min(-90).max(365).nullable().optional(),
     min_cash_buffer: Cents.nullable().optional(),
   })
   .openapi("ForecastAssumptionsPatch", {
@@ -200,6 +198,10 @@ const FlowSchema = z
       .openapi({ description: "What an override of this flow names" }),
     last_confirmed_at: z.string().nullable().optional(),
     days_overdue: z.number().int().nullable().optional(),
+    due_date: z.string().nullable().optional().openapi({
+      description:
+        "Invoices and bills, and their recurring templates: the due date. `date` is when the cash is expected (the due date plus the lag, or moved by a shift); this one never moves.",
+    }),
     tax_year: z
       .number()
       .int()
@@ -786,7 +788,7 @@ export function forecastRoutes() {
       tags,
       summary: "Propose an owner draw",
       description:
-        "One entry: debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so. `pay_reserve` makes it a payment toward a reserve part instead (a `reserve_payment` entry). `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries, each with the snapshot); one already pending is skipped.",
+        "Debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so. `pay_reserves` pays part of the amount out as reserve payments toward a part and tax year, each its own `reserve_payment` entry from the bank account (in book mode: debit the part's liability, clearing tax money held for the owner); only the remainder is the owner-draw entry, and `draw` is null when the payments take the whole amount. `reimburse_owner` pays back expenses the owner covered personally, recorded against a liability such as Due to Owner: in the same entry as the draw, debit that account (at most its balance owed) and Owner Draw for the rest, credit the bank. The payments and the reimbursement may not add up to more than the amount. `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries, each with the snapshot); one already pending is skipped.",
       security: bearerSecurity,
       request: {
         params: OrgParams,
@@ -801,8 +803,22 @@ export function forecastRoutes() {
             rationale: z.string().max(2000).nullable().optional(),
             lock_override_note: z.string().max(1000).nullable().optional(),
             include_true_ups: z.boolean().optional(),
-            pay_reserve: z
-              .object({ part_id: Id, tax_year: z.number().int().min(1900).max(9999) })
+            pay_reserves: z
+              .array(
+                z.object({
+                  part_id: Id,
+                  tax_year: z.number().int().min(1900).max(9999),
+                  amount: Cents.refine((n) => n > 0, "Must be positive"),
+                }),
+              )
+              .max(50)
+              .nullable()
+              .optional(),
+            reimburse_owner: z
+              .object({
+                account_id: Id.openapi({ description: "An active liability, such as Due to Owner" }),
+                amount: Cents.refine((n) => n > 0, "Must be positive"),
+              })
               .nullable()
               .optional(),
           }),
@@ -811,12 +827,20 @@ export function forecastRoutes() {
       responses: {
         201: json(
           z.object({
-            entry: EntrySchema,
-            status: z.string(),
-            review: z.object({ review_item_id: z.string().nullable(), reason: z.string() }).nullable(),
+            draw: z.union([SubmitResultSchema, z.null()]).openapi({
+              description:
+                "The owner-draw entry (with the reimbursement, if any) for what the reserve payments don't take; null when they take it all",
+            }),
+            payments: z.array(
+              z.object({
+                payment: ReservePaymentSchema,
+                entry_id: z.string().nullable(),
+                status: z.string().nullable(),
+                review_item_id: z.string().nullable(),
+              }),
+            ),
             forecast_snapshot: SnapshotSchema,
             exceeds_capacity: z.boolean(),
-            payment: z.union([ReservePaymentSchema, z.null()]),
             true_ups: z.array(
               z.object({
                 reserve_id: z.string(),
@@ -840,10 +864,15 @@ export function forecastRoutes() {
       );
       return c.json(
         {
-          ...submitView(out.result),
+          draw: out.draw ? submitView(out.draw) : null,
+          payments: out.payments.map((p) => ({
+            payment: p.payment,
+            entry_id: p.result?.entry.id ?? null,
+            status: p.result?.entry.status ?? null,
+            review_item_id: p.result?.reviewItemId ?? null,
+          })),
           forecast_snapshot: out.forecast_snapshot,
           exceeds_capacity: out.exceeds_capacity,
-          payment: out.payment,
           true_ups: out.true_ups.map(trueUpView),
         },
         201,

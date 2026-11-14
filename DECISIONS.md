@@ -532,3 +532,16 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
 - **Forecast uniqueness columns use '' rather than NULL** (#113): SQLite treats NULLs as distinct in
   a unique index, and drizzle-kit mangles expression indexes. `forecast_overrides.target_date` and
   `forecast_links.target_id` are not null and hold '' when there is none; the API shows null.
+- **Forecast timing is a day offset each for customers and bills, not a late share** (#113): the
+  "% paid late, this many days later still" pair split every invoice into two flows, was hard to
+  explain, and still said nothing about bills. `collection_lag_days` and `bill_lag_days` (negative
+  for early) answer the questions people actually ask, and every assumption defaults to 0, so a new
+  forecast shows the documents' own dates. Stored assumptions with the old keys still read; the
+  keys are ignored. Flows keep the due date beside the expected date so a shifted invoice still
+  shows when it was due.
+- **A draw can pay out reserves and reimburse the owner** (#113, #114): owners take one transfer
+  that is partly tax money already set aside, partly paying back expenses they covered personally,
+  and partly a true draw. Booking it all as Owner Draw would leave the reserve liability and Due to
+  Owner on the balance sheet. Each reserve part paid is its own `reserve_payment` entry (so
+  rejecting it removes the payment, as before); the reimbursement shares the draw's entry (Dr Due
+  to Owner, Dr Owner Draw, Cr bank) and is capped at the account's balance.

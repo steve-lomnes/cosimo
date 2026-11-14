@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, unwrap } from "../api/client";
 import type { components } from "../api/schema";
 
@@ -28,6 +28,20 @@ export function useReserveView(orgId: string, id: string, taxYear?: number) {
         }),
       ),
     enabled: Boolean(orgId && id),
+  });
+}
+
+/** Where each of several reserves stands in its current tax year (the same cache as `useReserveView`). */
+export function useReserveViews(orgId: string, ids: string[]) {
+  return useQueries({
+    queries: ids.map((id) => ({
+      queryKey: ["reserves", orgId, "view", id, ""],
+      queryFn: () =>
+        unwrap(
+          api.GET("/api/v1/orgs/{orgId}/reserves/{id}/view", { params: { path: { orgId, id }, query: {} } }),
+        ),
+      enabled: Boolean(orgId && id),
+    })),
   });
 }
 

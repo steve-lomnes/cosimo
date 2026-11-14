@@ -23584,7 +23584,7 @@ export interface paths {
         put?: never;
         /**
          * Propose an owner draw
-         * @description One entry: debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so. `pay_reserve` makes it a payment toward a reserve part instead (a `reserve_payment` entry). `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries, each with the snapshot); one already pending is skipped.
+         * @description Debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so. `pay_reserves` pays part of the amount out as reserve payments toward a part and tax year, each its own `reserve_payment` entry from the bank account (in book mode: debit the part's liability, clearing tax money held for the owner); only the remainder is the owner-draw entry, and `draw` is null when the payments take the whole amount. `reimburse_owner` pays back expenses the owner covered personally, recorded against a liability such as Due to Owner: in the same entry as the draw, debit that account (at most its balance owed) and Owner Draw for the rest, credit the bank. The payments and the reimbursement may not add up to more than the amount. `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries, each with the snapshot); one already pending is skipped.
          */
         post: {
             parameters: {
@@ -23620,10 +23620,27 @@ export interface paths {
                         rationale?: string | null;
                         lock_override_note?: string | null;
                         include_true_ups?: boolean;
-                        pay_reserve?: {
+                        pay_reserves?: {
                             /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                             part_id: string;
                             tax_year: number;
+                            /**
+                             * @description Integer minor units (cents)
+                             * @example 12345
+                             */
+                            amount: number;
+                        }[] | null;
+                        reimburse_owner?: {
+                            /**
+                             * @description An active liability, such as Due to Owner
+                             * @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5
+                             */
+                            account_id: string;
+                            /**
+                             * @description Integer minor units (cents)
+                             * @example 12345
+                             */
+                            amount: number;
                         } | null;
                     };
                 };
@@ -23636,15 +23653,16 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            entry: components["schemas"]["JournalEntry"];
-                            status: string;
-                            review: {
+                            /** @description The owner-draw entry (with the reimbursement, if any) for what the reserve payments don't take; null when they take it all */
+                            draw: components["schemas"]["SubmitResult"] | null;
+                            payments: {
+                                payment: components["schemas"]["ReservePayment"];
+                                entry_id: string | null;
+                                status: string | null;
                                 review_item_id: string | null;
-                                reason: string;
-                            } | null;
+                            }[];
                             forecast_snapshot: components["schemas"]["ForecastSnapshot"];
                             exceeds_capacity: boolean;
-                            payment: components["schemas"]["ReservePayment"] | null;
                             true_ups: {
                                 reserve_id: string;
                                 entry_id: string | null;
@@ -26620,11 +26638,12 @@ export interface components {
             attention: components["schemas"]["ForecastAttention"][];
             suggestions: components["schemas"]["ForecastSuggestion"][];
         };
-        /** @description Defaults: {"collection_lag_days":0,"late_share_pct":0,"late_days":30,"min_cash_buffer":0} */
+        /** @description Defaults: {"collection_lag_days":0,"bill_lag_days":0,"min_cash_buffer":0} */
         ForecastAssumptions: {
+            /** @description Days customers pay after the due date */
             collection_lag_days: number;
-            late_share_pct: number;
-            late_days: number;
+            /** @description Days bills are paid after the due date */
+            bill_lag_days: number;
             /**
              * @description Integer minor units (cents)
              * @example 12345
@@ -26654,6 +26673,8 @@ export interface components {
             };
             last_confirmed_at?: string | null;
             days_overdue?: number | null;
+            /** @description Invoices and bills, and their recurring templates: the due date. `date` is when the cash is expected (the due date plus the lag, or moved by a shift); this one never moves. */
+            due_date?: string | null;
             /** @description Reserve installments: the tax year it belongs to */
             tax_year?: number;
         };
@@ -26696,9 +26717,10 @@ export interface components {
             description: string | null;
             /** @description Only the values this scenario sets */
             assumptions: {
+                /** @description Days customers pay after the due date */
                 collection_lag_days?: number;
-                late_share_pct?: number;
-                late_days?: number;
+                /** @description Days bills are paid after the due date */
+                bill_lag_days?: number;
                 /**
                  * @description Integer minor units (cents)
                  * @example 12345
@@ -26715,8 +26737,7 @@ export interface components {
         /** @description A value of null clears it (a scenario then uses the baseline's). */
         ForecastAssumptionsPatch: {
             collection_lag_days?: number | null;
-            late_share_pct?: number | null;
-            late_days?: number | null;
+            bill_lag_days?: number | null;
             /**
              * @description Integer minor units (cents)
              * @example 12345
@@ -26868,6 +26889,26 @@ export interface components {
             periods: number;
             created_at: string;
         };
+        ReservePayment: {
+            id: string;
+            part_id: string;
+            reserve_id: string;
+            part_label: string;
+            tax_year: number;
+            date: string;
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            amount: number;
+            entry_id: string | null;
+            entry_status: string | null;
+            entry_reversed: boolean;
+            note: string | null;
+            created_by_actor: string;
+            created_at: string;
+            can_delete: boolean;
+        };
         ForecastSnapshot: {
             computed_at: string;
             scenario: {
@@ -26928,26 +26969,6 @@ export interface components {
             drivers: components["schemas"]["ForecastFlow"][];
             attention_count: number;
             exceeds_capacity: boolean;
-        };
-        ReservePayment: {
-            id: string;
-            part_id: string;
-            reserve_id: string;
-            part_label: string;
-            tax_year: number;
-            date: string;
-            /**
-             * @description Integer minor units (cents)
-             * @example 12345
-             */
-            amount: number;
-            entry_id: string | null;
-            entry_status: string | null;
-            entry_reversed: boolean;
-            note: string | null;
-            created_by_actor: string;
-            created_at: string;
-            can_delete: boolean;
         };
         Reserve: {
             id: string;

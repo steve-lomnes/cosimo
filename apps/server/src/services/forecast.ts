@@ -37,7 +37,6 @@ import {
   occurrence,
   reservesNotInWindow,
   type Schedule,
-  splitLate,
 } from "@cosimo/core";
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import { addDays, diffDays, isIsoDate, today } from "@cosimo/shared";
@@ -48,7 +47,7 @@ import { appendAudit } from "./audit.ts";
 import { listBankAccounts, mustGetBankAccount } from "./banking.ts";
 import { mustGetContact } from "./contacts.ts";
 import { openBalance } from "./documents.ts";
-import { accountMap, type SubmitResult, submitEntryTx, systemAccountId } from "./ledger.ts";
+import { accountMap, balances, type SubmitResult, submitEntryTx, systemAccountId } from "./ledger.ts";
 import { bodyOf, scheduleOf, templateTotal } from "./recurring.ts";
 import {
   type PaymentView,
@@ -235,9 +234,8 @@ export function checkAssumptions(
   input: Partial<Record<keyof ForecastAssumptions, number | null>>,
 ): Partial<ForecastAssumptions> {
   const limits: Record<keyof ForecastAssumptions, [number, number]> = {
-    collection_lag_days: [0, 365],
-    late_share_pct: [0, 100],
-    late_days: [0, 365],
+    collection_lag_days: [-90, 365],
+    bill_lag_days: [-90, 365],
     min_cash_buffer: [0, Number.MAX_SAFE_INTEGER],
   };
   const out: Partial<ForecastAssumptions> = {};
@@ -1227,7 +1225,7 @@ async function invoiceFlows(c: Ctx): Promise<{ flows: Flow[]; overdue: Attention
     .where(and(inArray(org.invoices.status, ["sent", "partial"]), isNull(org.invoices.voidedAt)))
     .orderBy(asc(org.invoices.dueDate), asc(org.invoices.number))
     .all();
-  const { collection_lag_days: lag, late_share_pct: pct, late_days: lateDays } = c.assumptions;
+  const lag = c.assumptions.collection_lag_days;
   const flows: Flow[] = [];
   const overdue: AttentionItem[] = [];
   for (const r of rows) {
@@ -1235,25 +1233,18 @@ async function invoiceFlows(c: Ctx): Promise<{ flows: Flow[]; overdue: Attention
     if (open <= 0) continue;
     const daysOverdue = Math.max(0, diffDays(c.today, r.dueDate));
     const due = addDays(r.dueDate, lag);
-    const { late, onTime } = splitLate(open, pct);
-    const base = {
-      source: "invoice" as const,
+    flows.push({
+      id: `inv:${r.id}`,
+      date: clamp(due, c.today),
+      amount: open,
+      source: "invoice",
       ref: r.id,
-      firmness: "booked" as const,
+      label: `Invoice ${r.number} (${r.customer})`,
+      firmness: "booked",
       target: { type: "invoice", id: r.id },
       days_overdue: daysOverdue,
-    };
-    const label = `Invoice ${r.number} (${r.customer})`;
-    if (onTime > 0)
-      flows.push({ ...base, id: `inv:${r.id}`, date: clamp(due, c.today), amount: onTime, label });
-    if (late > 0)
-      flows.push({
-        ...base,
-        id: `inv:${r.id}:late`,
-        date: clamp(addDays(due, lateDays), c.today),
-        amount: late,
-        label: `${label}, late share`,
-      });
+      due_date: r.dueDate,
+    });
     if (daysOverdue > 0)
       overdue.push({
         kind: "invoice_overdue",
@@ -1283,13 +1274,14 @@ async function billFlows(c: Ctx): Promise<Flow[]> {
     if (open <= 0) continue;
     flows.push({
       id: `bill:${r.id}`,
-      date: clamp(r.dueDate, c.today),
+      date: clamp(addDays(r.dueDate, c.assumptions.bill_lag_days), c.today),
       amount: -open,
       source: "bill",
       ref: r.id,
       label: `Bill ${r.number ? `${r.number} ` : ""}(${r.vendor})`,
       firmness: "booked",
       target: { type: "bill", id: r.id },
+      due_date: r.dueDate,
     });
   }
   return flows;
@@ -1312,8 +1304,10 @@ async function templateFlows(c: Ctx): Promise<Flow[]> {
   for (const t of await activeTemplates(c.db)) {
     const body = bodyOf(t);
     const s = scheduleOf(t);
-    // A bill or invoice runs on the occurrence date and is due `due_days` later; an entry moves cash that day.
+    // A bill or invoice runs on the occurrence date and is due `due_days` later, and the cash moves
+    // the matching lag after that; an entry moves cash that day.
     let amount: number;
+    let dueDays: number | null = null;
     let lag = 0;
     if (t.kind === "entry") {
       amount = body.lines.reduce(
@@ -1323,13 +1317,15 @@ async function templateFlows(c: Ctx): Promise<Flow[]> {
     } else {
       const total = templateTotal(t.kind, body);
       amount = t.kind === "invoice" ? total : -total;
-      lag = body.due_days ?? 0;
+      dueDays = body.due_days ?? 0;
+      lag = t.kind === "invoice" ? c.assumptions.collection_lag_days : c.assumptions.bill_lag_days;
     }
     if (amount === 0) continue;
     for (let n = t.nextIndex, k = 0; k < MAX_TEMPLATE_OCCURRENCES; n++, k++) {
       const d = occurrence(s as Schedule, n);
       if (!d) break;
-      const date = addDays(d, lag);
+      const due = dueDays == null ? null : addDays(d, dueDays);
+      const date = addDays(due ?? d, lag);
       if (d > c.end && date > c.end) break;
       flows.push({
         id: `tpl:${t.id}:${n}`,
@@ -1340,6 +1336,7 @@ async function templateFlows(c: Ctx): Promise<Flow[]> {
         label: t.name,
         firmness: "scheduled",
         target: { type: "recurring_template", id: t.id },
+        due_date: due,
       });
     }
   }
@@ -1442,7 +1439,7 @@ async function plannedFlows(c: Ctx, items: ItemRow[]): Promise<PlannedResult> {
         kind: "planned_unconfirmed",
         ref: it.id,
         item_id: it.id,
-        message: `${it.name} hasn't been confirmed in over ${PLANNED_STALE_DAYS} days. Confirm it still holds, or change or archive it.`,
+        message: `${it.name} hasn't been checked in over ${PLANNED_STALE_DAYS} days. If it still holds, mark it checked; otherwise edit or remove it.`,
       });
   }
   return out;
@@ -1792,13 +1789,24 @@ export interface DrawTrueUp {
   skipped: string | null;
 }
 
+/** A reserve payment made as part of an owner draw (`pay_reserves`). */
+export interface DrawPayment {
+  payment: PaymentView;
+  result: SubmitResult | null;
+}
+
 /**
  * Propose an owner draw: Dr Owner Draw / Cr the bank account's ledger account, through the review
  * policy, with the forecast the server computed attached to the review item. A draw over capacity
  * is never refused; the result says so.
  *
- * - `pay_reserve` makes the draw a payment toward a reserve part instead
- *   (`recordReservePaymentTx`, from the bank account).
+ * - `pay_reserves` pays part of the draw out as reserve payments (`recordReservePaymentTx`, from
+ *   the bank account, on the draw's date), each its own entry: in book mode it clears the money
+ *   held for the owner in the part's liability account. Only the remainder is an ordinary owner
+ *   draw entry, and none is proposed when the payments take the whole amount.
+ * - `reimburse_owner` pays back expenses the owner covered personally (a "Due to Owner" liability)
+ *   in the same entry as the draw: Dr that account for the reimbursement, Dr Owner Draw for what is
+ *   left, Cr bank for both. It may not exceed what the account owes the owner (its posted balance).
  * - `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount
  *   differs from its target today, each a separate entry; one already pending is skipped.
  *
@@ -1818,18 +1826,61 @@ export async function proposeOwnerDrawTx(
     rationale?: string | null;
     lock_override_note?: string | null;
     include_true_ups?: boolean;
-    pay_reserve?: { part_id: string; tax_year: number } | null;
+    pay_reserves?: { part_id: string; tax_year: number; amount: number }[] | null;
+    reimburse_owner?: { account_id: string; amount: number } | null;
   },
 ): Promise<{
-  result: SubmitResult;
+  draw: SubmitResult | null;
+  payments: DrawPayment[];
   forecast_snapshot: ForecastSnapshot;
   exceeds_capacity: boolean;
-  payment: PaymentView | null;
   true_ups: DrawTrueUp[];
 }> {
   if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
     throw unprocessable("The draw must be a positive amount.", "invalid_amount");
   if (!isIsoDate(input.date)) throw unprocessable("Enter a valid date.", "invalid_date");
+  const pays = input.pay_reserves ?? [];
+  let paid = 0;
+  for (const p of pays) {
+    if (!Number.isSafeInteger(p.amount) || p.amount <= 0)
+      throw unprocessable("Each reserve payment must be a positive amount.", "invalid_amount");
+    paid += p.amount;
+  }
+  const back = input.reimburse_owner ?? null;
+  if (back) {
+    if (!Number.isSafeInteger(back.amount) || back.amount <= 0)
+      throw unprocessable("The reimbursement must be a positive amount.", "invalid_amount");
+    const acct = (await accountMap(tx)).get(back.account_id);
+    if (acct?.type !== "liability" || !acct.isActive)
+      throw unprocessable("Reimburse the owner from an active liability account.", "invalid_account");
+    // Debit-positive: what the account owes the owner is its credit balance, less repayments
+    // already waiting in review (so two pending draws can't each pay back the whole balance).
+    const pendingRow = await tx
+      .select({ total: sql<number>`coalesce(sum(${org.journalLines.amount}), 0)` })
+      .from(org.journalLines)
+      .innerJoin(org.journalEntries, eq(org.journalEntries.id, org.journalLines.entryId))
+      .where(
+        and(
+          eq(org.journalLines.accountId, back.account_id),
+          eq(org.journalEntries.status, "pending_review"),
+          sql`${org.journalLines.amount} > 0`,
+        ),
+      )
+      .get();
+    const owed = -((await balances(tx)).get(back.account_id) ?? 0) - Number(pendingRow?.total ?? 0);
+    if (back.amount > owed)
+      throw unprocessable(
+        `The reimbursement is more than the ${(Math.max(0, owed) / 100).toFixed(2)} the account owes the owner${pendingRow?.total ? ", after repayments waiting in review" : ""}.`,
+        "invalid_amount",
+      );
+  }
+  if (paid + (back?.amount ?? 0) > input.amount)
+    throw unprocessable(
+      back
+        ? "The reserve payments and the reimbursement add up to more than the draw."
+        : "The reserve payments add up to more than the draw.",
+      "invalid_amount",
+    );
   const bank = await mustGetBankAccount(tx, input.bank_account_id);
   const f = await forecast(tx, { scenario_id: input.scenario_id, ...input.window });
   const snapshot = forecastSnapshot(f, input.amount);
@@ -1858,53 +1909,55 @@ export async function proposeOwnerDrawTx(
       true_ups.push({ reserve_id: reserveId, result: r, skipped: null });
     }
   }
-  if (input.pay_reserve) {
-    const paid = await recordReservePaymentTx(
-      tx,
-      orgId,
-      a,
-      {
-        part_id: input.pay_reserve.part_id,
-        tax_year: input.pay_reserve.tax_year,
-        date: input.date,
-        amount: input.amount,
-        note: input.memo ?? null,
-        from_bank_account_id: bank.id,
-        rationale: input.rationale ?? null,
-        lock_override_note: input.lock_override_note ?? null,
-      },
-      { reviewContext },
+  const payments: DrawPayment[] = [];
+  for (const p of pays)
+    payments.push(
+      await recordReservePaymentTx(
+        tx,
+        orgId,
+        a,
+        {
+          part_id: p.part_id,
+          tax_year: p.tax_year,
+          date: input.date,
+          amount: p.amount,
+          note: input.memo ?? null,
+          from_bank_account_id: bank.id,
+          rationale: input.rationale ?? null,
+          lock_override_note: input.lock_override_note ?? null,
+        },
+        { reviewContext },
+      ),
     );
-    return {
-      result: paid.result!,
-      forecast_snapshot: snapshot,
-      exceeds_capacity: snapshot.exceeds_capacity,
-      payment: paid.payment,
-      true_ups,
-    };
-  }
-  const result = await submitEntryTx(
-    tx,
-    orgId,
-    a,
-    {
-      date: input.date,
-      memo: input.memo?.trim() || "Owner draw",
-      lines: [
-        { accountId: await systemAccountId(tx, "owner_draw"), amount: input.amount },
-        { accountId: bank.ledgerAccountId, amount: -input.amount },
-      ],
-      sourceType: "owner_draw",
-      rationale: input.rationale ?? null,
-      lockOverrideNote: input.lock_override_note ?? null,
-    },
-    { reviewContext },
-  );
+  // One entry for the reimbursement and the ordinary draw: what the reserve payments don't take.
+  const reimbursed = back?.amount ?? 0;
+  const rest = input.amount - paid - reimbursed;
+  const lines: { accountId: string; amount: number }[] = [];
+  if (back) lines.push({ accountId: back.account_id, amount: reimbursed });
+  if (rest > 0) lines.push({ accountId: await systemAccountId(tx, "owner_draw"), amount: rest });
+  const draw = lines.length
+    ? await submitEntryTx(
+        tx,
+        orgId,
+        a,
+        {
+          date: input.date,
+          memo:
+            input.memo?.trim() ||
+            (back ? (rest > 0 ? "Owner reimbursement and draw" : "Owner reimbursement") : "Owner draw"),
+          lines: [...lines, { accountId: bank.ledgerAccountId, amount: -(rest + reimbursed) }],
+          sourceType: "owner_draw",
+          rationale: input.rationale ?? null,
+          lockOverrideNote: input.lock_override_note ?? null,
+        },
+        { reviewContext },
+      )
+    : null;
   return {
-    result,
+    draw,
+    payments,
     forecast_snapshot: snapshot,
     exceeds_capacity: snapshot.exceeds_capacity,
-    payment: null,
     true_ups,
   };
 }

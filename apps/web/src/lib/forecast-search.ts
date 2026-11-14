@@ -1,6 +1,6 @@
 /**
  * Search-anywhere for forecast transactions: every word typed must match somewhere in the row (its
- * name, type, how firm it is, its date in any common spelling, or its amount), and `>1000` / `<50`
+ * name, type, how firm it is, its date or due date in any common spelling, or its amount), and `>1000` / `<50`
  * keep rows by size. Matching is the same keyword matcher the account and contact pickers use.
  */
 import type { ForecastFlow } from "./forecast";
@@ -22,18 +22,22 @@ const MONTHS = [
   "december",
 ];
 
+function dateWords(date: string): string {
+  const [y, m, d] = date.split("-");
+  const month = MONTHS[Number(m) - 1] ?? "";
+  return `${date} ${y} ${month} ${month.slice(0, 3)} ${Number(d)}`;
+}
+
 /** The words a flow can be found by, beyond its label. */
 export function flowKeywords(f: ForecastFlow): string {
-  const [y, m, d] = f.date.split("-");
-  const month = MONTHS[Number(m) - 1] ?? "";
   const abs = Math.abs(f.amount);
   const dollars = Math.floor(abs / 100);
   return [
     SOURCE_CHIP[f.source],
     FIRMNESS_LABEL[f.firmness],
     f.amount >= 0 ? "in money-in incoming receipt" : "out money-out outgoing payment",
-    f.date,
-    `${y} ${month} ${month.slice(0, 3)} ${Number(d)}`,
+    dateWords(f.date),
+    f.due_date ? `due ${dateWords(f.due_date)}` : "",
     String(dollars),
     `${dollars.toLocaleString("en-US")}.${String(abs % 100).padStart(2, "0")}`,
   ].join(" ");

@@ -141,7 +141,7 @@ const EntryInputSchema = z.object({
   rationale: z.string().max(2000).nullable().optional(),
 });
 
-const SubmitResultSchema = z
+export const SubmitResultSchema = z
   .object({
     entry: EntrySchema,
     status: z.enum(ENTRY_STATUSES),

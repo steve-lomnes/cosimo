@@ -2185,18 +2185,17 @@ const AssumptionsArg = z
     collection_lag_days: z
       .number()
       .int()
-      .min(0)
+      .min(-90)
       .max(365)
       .optional()
-      .describe("Days customers pay after the due date."),
-    late_share_pct: z
+      .describe("Days customers pay after an invoice's due date (default 0); negative if they pay early."),
+    bill_lag_days: z
       .number()
       .int()
-      .min(0)
-      .max(100)
+      .min(-90)
+      .max(365)
       .optional()
-      .describe("Percent of each invoice that pays late_days later still."),
-    late_days: z.number().int().min(0).max(365).optional(),
+      .describe("Days the business pays a bill after its due date (default 0); negative if early."),
     min_cash_buffer: cents("Cash to keep on hand.", "nonnegative").optional(),
   })
   .describe("Assumptions this scenario changes; the rest use the baseline's.");
@@ -2205,7 +2204,7 @@ tool({
   name: "get_cash_forecast",
   title: "Get the cash forecast",
   description:
-    "The cash forecast from today: opening cash (the cash accounts, not cards), buckets of expected inflows and outflows with their flows, the low point (the lowest balance and its date), and draw_capacity, which is how much the owner can draw now without cash dropping below the cash buffer. To recommend a draw, give draw_capacity.amount, then list draw_capacity.binding (the outflows that set the low point) and the drivers with how firm each is (booked, scheduled, pending, planned, draw), and surface every attention item so the person can correct stale information (a planned item past due, an overdue invoice, a stale bank feed). Open invoices count as coming in on their due date plus the scenario's collection lag. Without scenario_id it is the baseline.",
+    "The cash forecast from today: opening cash (the cash accounts, not cards), buckets of expected inflows and outflows with their flows, the low point (the lowest balance and its date), and draw_capacity, which is how much the owner can draw now without cash dropping below the cash buffer. To recommend a draw, give draw_capacity.amount, then list draw_capacity.binding (the outflows that set the low point) and the drivers with how firm each is (booked, scheduled, pending, planned, draw), and surface every attention item so the person can correct stale information (a planned item past due, an overdue invoice, a stale bank feed). Open invoices count as coming in on their due date plus the scenario's collection lag (collection_lag_days, default 0), and open bills as going out on their due date plus bill_lag_days (default 0); invoice and bill flows carry due_date, which a shift override never moves. Without scenario_id it is the baseline.",
   write: false,
   money: true,
   input: z.object({ scenario_id: ScenarioIdArg, ...ForecastWindowArgs }),
@@ -2402,7 +2401,7 @@ tool({
   name: "propose_owner_draw",
   title: "Propose an owner draw",
   description:
-    "Propose an owner draw: debit Owner Draw, credit the chosen bank account, on the date. It goes through the review policy like any entry (for an assistant, the review queue). The server computes the forecast itself and attaches it to the review item (capacity, low point, drivers), so the reviewer sees what the draw was judged against. A draw over draw_capacity is never refused: the result says exceeds_capacity, so tell the person. Pending, it counts as an outflow in the forecast. Call get_cash_forecast first and give the person the capacity. With include_true_ups, it also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries; all are returned in true_ups). With pay_reserve, the draw is a payment toward that reserve part and tax year instead (from the bank account), as record_reserve_payment would record it.",
+    "Propose an owner draw: debit Owner Draw, credit the chosen bank account, on the date. It goes through the review policy like any entry (for an assistant, the review queue). The server computes the forecast itself and attaches it to the review item (capacity, low point, drivers), so the reviewer sees what the draw was judged against. A draw over draw_capacity is never refused: the result says exceeds_capacity, so tell the person. Pending, it counts as an outflow in the forecast. Call get_cash_forecast first and give the person the capacity. With include_true_ups, it also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries; all are returned in true_ups). With pay_reserves, part of the draw is paid out as reserve payments toward a part and tax year (from the bank account, on the draw's date), each its own entry as record_reserve_payment would record it; in book mode that clears tax money held for the owner in the part's liability account. With reimburse_owner, the draw also pays back expenses the owner covered personally, recorded against a liability such as Due to Owner (at most that account's balance): the same entry debits it, and Owner Draw for the rest. Only the remainder is an Owner Draw entry (none when the payments take the whole amount). The payments and the reimbursement may not add up to more than the amount.",
   write: true,
   money: true,
   input: z.object({
@@ -2416,13 +2415,24 @@ tool({
       .boolean()
       .optional()
       .describe("Also propose true-ups of book-mode reserves that are off their target."),
-    pay_reserve: z
+    pay_reserves: z
+      .array(
+        z.object({
+          part_id: z.string().describe("A reserve part from get_reserves."),
+          tax_year: z.number().int().min(1900).max(9999).describe("The tax year the payment is for."),
+          amount: cents("How much of the draw pays this part. Positive.", "positive"),
+        }),
+      )
+      .max(50)
+      .optional()
+      .describe("Pay these amounts of the draw toward reserve parts; the rest is an ordinary owner draw."),
+    reimburse_owner: z
       .object({
-        part_id: z.string().describe("A reserve part from get_reserves."),
-        tax_year: z.number().int().min(1900).max(9999).describe("The tax year the payment is for."),
+        account_id: z.string().describe("The Due to Owner liability account (from get_account_balances)."),
+        amount: cents("How much of the draw pays the owner back. Positive.", "positive"),
       })
       .optional()
-      .describe("Make the draw a payment toward this reserve part instead."),
+      .describe("Pay back out-of-pocket expenses recorded against this liability as part of the draw."),
     rationale: Rationale,
   }),
   async run(t, i) {
@@ -2437,21 +2447,29 @@ tool({
         window: { window: i.window, bucket: i.bucket, periods: i.periods },
         rationale: i.rationale,
         include_true_ups: i.include_true_ups,
-        pay_reserve: i.pay_reserve ?? null,
+        pay_reserves: i.pay_reserves ?? null,
+        reimburse_owner: i.reimburse_owner ?? null,
       }),
     );
+    // The draw entry, or the first payment's when the payments took the whole amount.
+    const first = out.draw ?? out.payments.find((p) => p.result)?.result ?? null;
     return {
-      ...outcome(out.result),
+      draw: out.draw ? outcome(out.draw) : null,
+      reserve_payments: out.payments.map((p) => ({
+        payment: p.payment,
+        ...(p.result ? outcome(p.result) : { status: "recorded", review_item_id: null, entry_id: null }),
+      })),
       forecast_snapshot: out.forecast_snapshot,
       exceeds_capacity: out.exceeds_capacity,
-      ...(out.payment ? { reserve_payment: out.payment } : {}),
       true_ups: out.true_ups.map((x) => ({
         reserve_id: x.reserve_id,
         ...(x.result ? outcome(x.result) : { status: "skipped", message: x.skipped }),
       })),
       message: out.exceeds_capacity
         ? `Proposed, but the draw is more than the forecast's capacity (${(out.forecast_snapshot.draw_capacity.amount / 100).toFixed(2)}). Tell the person.`
-        : outcome(out.result).message,
+        : first
+          ? outcome(first).message
+          : "Recorded.",
     };
   },
 });

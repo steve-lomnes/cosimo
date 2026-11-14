@@ -556,7 +556,7 @@ describe(`reserves in the forecast (${DB_MODE})`, () => {
     expect(after.draw_capacity.amount).toBe(opening - 6_000 - 25_000);
   });
 
-  test("propose_owner_draw with include_true_ups and with pay_reserve", async () => {
+  test("propose_owner_draw with include_true_ups and with pay_reserves", async () => {
     const o = await freshOrg("Reserve Draw Co");
     await income(o, 100_000);
     const r = await reserve(o, twoParts(o, "book"));
@@ -570,14 +570,15 @@ describe(`reserves in the forecast (${DB_MODE})`, () => {
       rationale: "Monthly draw",
     });
     expect(d.isError).toBe(false);
-    expect(d.structuredContent.status).toBe("pending_review");
+    expect(d.structuredContent.draw.status).toBe("pending_review");
     expect(d.structuredContent.true_ups).toHaveLength(1);
     const tu = d.structuredContent.true_ups[0];
     expect(tu).toMatchObject({ reserve_id: r.id, status: "pending_review" });
     const tuItem = (await owner.json("GET", `${o.base}/review/${tu.review_item_id}`)).body;
     expect(tuItem.payload.forecast_snapshot.draw_capacity).toBeDefined();
     expect(tuItem.payload.entry.source_type).toBe("reserve_true_up");
-    const drawItem = (await owner.json("GET", `${o.base}/review/${d.structuredContent.review_item_id}`)).body;
+    const drawItem = (await owner.json("GET", `${o.base}/review/${d.structuredContent.draw.review_item_id}`))
+      .body;
     expect(drawItem.payload.entry.source_type).toBe("owner_draw");
 
     // Booked counts the pending true-up, so nothing is off target now.
@@ -603,39 +604,69 @@ describe(`reserves in the forecast (${DB_MODE})`, () => {
       expect.objectContaining({ reserve_id: r.id, status: "skipped" }),
     ]);
 
-    // pay_reserve: the draw is a payment toward the part instead.
+    // pay_reserves: part of the draw pays out tax money held for the owner (Dr the part's
+    // liability / Cr bank), and the remainder is an ordinary owner draw.
     const p = await call(token, "propose_owner_draw", {
       date: T,
-      amount: 7_000,
+      amount: 10_000,
       bank_account_id: o.bank,
-      pay_reserve: { part_id: r.parts[0].id, tax_year: Y },
-      rationale: "Estimated tax",
+      pay_reserves: [{ part_id: r.parts[0].id, tax_year: Y, amount: 7_000 }],
+      rationale: "Estimated tax and a draw",
     });
     expect(p.isError).toBe(false);
-    expect(p.structuredContent.reserve_payment).toMatchObject({ amount: 7_000, tax_year: Y });
-    const pe = (await owner.json("GET", `${o.base}/entries/${p.structuredContent.entry_id}`)).body;
-    expect(pe).toMatchObject({
-      source_type: "reserve_payment",
-      source_id: p.structuredContent.reserve_payment.id,
-    });
+    const pay = p.structuredContent.reserve_payments;
+    expect(pay).toHaveLength(1);
+    expect(pay[0]).toMatchObject({ status: "pending_review", payment: { amount: 7_000, tax_year: Y } });
+    const pe = (await owner.json("GET", `${o.base}/entries/${pay[0].entry_id}`)).body;
+    expect(pe).toMatchObject({ source_type: "reserve_payment", source_id: pay[0].payment.id, date: T });
     expect(pe.lines.map((l: any) => [l.account_id, l.amount])).toEqual([
       [o.liabA, 7_000],
       [o.acct["1000"], -7_000],
     ]);
-    const payItem = (await owner.json("GET", `${o.base}/review/${p.structuredContent.review_item_id}`)).body;
+    const payItem = (await owner.json("GET", `${o.base}/review/${pay[0].review_item_id}`)).body;
     expect(payItem.payload.forecast_snapshot).toBeDefined();
-    expect(payItem.payload.reserve_payment.payment_id).toBe(p.structuredContent.reserve_payment.id);
+    expect(payItem.payload.reserve_payment.payment_id).toBe(pay[0].payment.id);
+    const de = (await owner.json("GET", `${o.base}/entries/${p.structuredContent.draw.entry_id}`)).body;
+    expect(de.source_type).toBe("owner_draw");
+    expect(de.lines.map((l: any) => l.amount).sort((a: number, b: number) => a - b)).toEqual([-3_000, 3_000]);
 
-    // REST takes the same options.
+    // REST takes the same options. Payments that take the whole amount leave no draw entry.
     const rest = await owner.json("POST", `${o.base}/forecast/draws`, {
+      date: T,
+      amount: 3_000,
+      bank_account_id: o.bank,
+      pay_reserves: [
+        { part_id: r.parts[0].id, tax_year: Y, amount: 1_000 },
+        { part_id: r.parts[1].id, tax_year: Y, amount: 2_000 },
+      ],
+    });
+    expect(rest.status).toBe(201);
+    expect(rest.body.draw).toBeNull();
+    expect(rest.body.payments.map((x: any) => [x.payment.part_id, x.payment.amount])).toEqual([
+      [r.parts[0].id, 1_000],
+      [r.parts[1].id, 2_000],
+    ]);
+    const restEntry = (await owner.json("GET", `${o.base}/entries/${rest.body.payments[1].entry_id}`)).body;
+    expect(restEntry.source_type).toBe("reserve_payment");
+    expect(restEntry.lines.map((l: any) => [l.account_id, l.amount])).toEqual([
+      [o.liabB, 2_000],
+      [o.acct["1000"], -2_000],
+    ]);
+
+    // Payments over the draw amount are refused, and nothing is proposed.
+    const before = (await owner.json("GET", `${o.base}/entries?source_type=reserve_payment`)).body.data
+      .length;
+    const over = await owner.json("POST", `${o.base}/forecast/draws`, {
       date: T,
       amount: 1_000,
       bank_account_id: o.bank,
-      pay_reserve: { part_id: r.parts[1].id, tax_year: Y },
+      pay_reserves: [{ part_id: r.parts[0].id, tax_year: Y, amount: 1_001 }],
     });
-    expect(rest.status).toBe(201);
-    expect(rest.body.payment).toMatchObject({ part_id: r.parts[1].id });
-    expect(rest.body.entry.source_type).toBe("reserve_payment");
+    expect(over.status).toBe(422);
+    expect(over.body.error.code).toBe("invalid_amount");
+    expect((await owner.json("GET", `${o.base}/entries?source_type=reserve_payment`)).body.data).toHaveLength(
+      before,
+    );
   });
 });
 

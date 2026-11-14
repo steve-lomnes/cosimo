@@ -1,6 +1,6 @@
 /**
  * Cash forecast (#113). Pure, shared by the server and tests: bucket ranges, planned-item
- * occurrences, the late-payment split, scenario overrides, and the roll-up of flows into buckets,
+ * occurrences, scenario overrides, and the roll-up of flows into buckets,
  * the low point, and how much can be drawn. All amounts are integer cents; a flow's amount is
  * signed (positive is money in).
  */
@@ -21,19 +21,17 @@ export interface ForecastWindow {
 }
 
 export interface ForecastAssumptions {
-  /** Days added to an open invoice's due date before the money is expected. */
+  /** Days customers pay after an invoice's due date (negative: early). */
   collection_lag_days: number;
-  /** Share (0-100) of each open invoice that arrives `late_days` later still. */
-  late_share_pct: number;
-  late_days: number;
+  /** Days the business pays a bill after its due date (negative: early). */
+  bill_lag_days: number;
   /** Cash to keep on hand, in cents. */
   min_cash_buffer: number;
 }
 
 export const DEFAULT_ASSUMPTIONS: ForecastAssumptions = {
   collection_lag_days: 0,
-  late_share_pct: 0,
-  late_days: 30,
+  bill_lag_days: 0,
   min_cash_buffer: 0,
 };
 
@@ -60,6 +58,8 @@ export interface Flow {
   last_confirmed_at?: string | null;
   /** Invoices: days past the due date today. */
   days_overdue?: number | null;
+  /** Invoices and bills (and their templates): the due date, before any lag or shift. */
+  due_date?: IsoDate | null;
   /** Reserves: the tax year an installment belongs to. */
   tax_year?: number;
 }
@@ -127,12 +127,6 @@ export function itemOccurrences(item: ItemSchedule, from: IsoDate, to: IsoDate):
     out.push(d);
   }
   return out;
-}
-
-/** Split an amount into the part that is late (rounded) and the part that comes on time. */
-export function splitLate(amount: number, pct: number): { late: number; onTime: number } {
-  const late = Math.round((amount * pct) / 100);
-  return { late, onTime: amount - late };
 }
 
 /** Apply a scenario's exclude and shift overrides to flows that carry a `target`. */

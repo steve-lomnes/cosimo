@@ -1,3 +1,4 @@
+import { diffDays } from "@cosimo/shared";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, unwrap } from "../api/client";
 import type { components } from "../api/schema";
@@ -113,3 +114,22 @@ export const SOURCE_CHIP: Record<ForecastFlow["source"], string> = {
   draw: "Draw",
   reserve: "Reserve",
 };
+
+const shortDate = (d: string) =>
+  new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+
+/**
+ * Invoices and bills: "Due Nov 30", and how far the expected date is from it ("· expected 5 days
+ * late"). Null for flows with no due date.
+ */
+export function dueNote(f: Pick<ForecastFlow, "date" | "due_date">): string | null {
+  if (!f.due_date) return null;
+  const due = `Due ${shortDate(f.due_date)}`;
+  const n = diffDays(f.date, f.due_date);
+  if (n === 0) return due;
+  return `${due} · expected ${Math.abs(n)} day${Math.abs(n) === 1 ? "" : "s"} ${n > 0 ? "late" : "early"}`;
+}

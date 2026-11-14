@@ -1,6 +1,6 @@
 /**
- * Cash forecast (#113): roles, the lazily created baseline, flows from open invoices (with lag and
- * a late share), bills, recurring templates, and entries waiting in review, scenario overlays,
+ * Cash forecast (#113): roles, the lazily created baseline, flows from open invoices and bills (with
+ * their lags and due dates), recurring templates, and entries waiting in review, scenario overlays,
  * duplicate and promote, links to what happened, suggested matches, attention items, the agent
  * ownership rule over MCP, owner draws with their forecast snapshot, and an export round trip.
  */
@@ -158,7 +158,7 @@ describe(`forecast flows and scenarios (${DB_MODE})`, () => {
     expect((await auditFor(o, "forecast.scenario.create")).length).toBe(1);
   });
 
-  test("open invoices (lag and late share), bills, recurring templates, and pending cash entries become flows", async () => {
+  test("open invoices and bills (with their lags), recurring templates, and pending cash entries become flows", async () => {
     const o = await freshOrg("Forecast Flows Co");
     const due = addDays(T, 5);
     const inv = await invoice(o, 100_000, due);
@@ -185,25 +185,42 @@ describe(`forecast flows and scenarios (${DB_MODE})`, () => {
     ]);
 
     await owner.json("PATCH", `${o.base}/forecast/scenarios/baseline`, {
-      assumptions: { collection_lag_days: 3, late_share_pct: 50, late_days: 30 },
+      assumptions: { collection_lag_days: 3, bill_lag_days: 2 },
     });
     const f = await get(o);
-    expect(f.assumptions).toMatchObject({ collection_lag_days: 3, late_share_pct: 50, late_days: 30 });
+    expect(f.assumptions).toEqual({ collection_lag_days: 3, bill_lag_days: 2, min_cash_buffer: 0 });
     const flows = flowsOf(f);
     const by = (id: string) => flows.find((x: any) => x.id === id);
-    expect(by(`inv:${inv.id}`)).toMatchObject({ amount: 50_000, date: addDays(due, 3), firmness: "booked" });
-    expect(by(`inv:${inv.id}:late`)).toMatchObject({ amount: 50_000, date: addDays(due, 33) });
-    expect(by(`bill:${b.id}`)).toMatchObject({ amount: -30_000, date: addDays(T, 2), source: "bill" });
-    // Overdue by 9 days, plus 3 days of lag, is still before today: it lands today, half of it late.
-    expect(by(`inv:${overdue.id}`)).toMatchObject({ amount: 10_000, date: T, days_overdue: 9 });
-    expect(by(`inv:${overdue.id}:late`)!.date).toBe(addDays(addDays(T, -6), 30));
-    const rent = flows.find((x: any) => x.ref === tpl.body.id);
-    expect(rent).toMatchObject({ amount: -50_000, date: addDays(next, 10), firmness: "scheduled" });
-    expect(flows.find((x: any) => x.firmness === "pending")).toMatchObject({
-      amount: 300_000,
-      date: addDays(T, 1),
-      source: "pending",
+    expect(by(`inv:${inv.id}`)).toMatchObject({
+      amount: 100_000,
+      date: addDays(due, 3),
+      due_date: due,
+      firmness: "booked",
     });
+    expect(by(`bill:${b.id}`)).toMatchObject({
+      amount: -30_000,
+      date: addDays(T, 4),
+      due_date: addDays(T, 2),
+      source: "bill",
+    });
+    // Overdue by 9 days, plus 3 days of lag, is still before today: it lands today.
+    expect(by(`inv:${overdue.id}`)).toMatchObject({
+      amount: 20_000,
+      date: T,
+      days_overdue: 9,
+      due_date: addDays(T, -9),
+    });
+    // The template's bill is due 10 days after it runs, and paid the bill lag after that.
+    const rent = flows.find((x: any) => x.ref === tpl.body.id);
+    expect(rent).toMatchObject({
+      amount: -50_000,
+      date: addDays(next, 12),
+      due_date: addDays(next, 10),
+      firmness: "scheduled",
+    });
+    const pendingFlow = flows.find((x: any) => x.firmness === "pending");
+    expect(pendingFlow).toMatchObject({ amount: 300_000, date: addDays(T, 1), source: "pending" });
+    expect(pendingFlow.due_date ?? null).toBeNull();
     expect(f.attention.some((a: any) => a.kind === "invoice_overdue" && a.ref === overdue.id)).toBe(true);
     // The low point is the opening balance until money comes in; the pending inflow lifts it.
     expect(f.low_point.balance).toBeLessThanOrEqual(200_000);
@@ -215,6 +232,70 @@ describe(`forecast flows and scenarios (${DB_MODE})`, () => {
     });
     // Totals reconcile: inflow minus outflow of the buckets equals the last ending less the opening.
     expect(f.drivers.length).toBeGreaterThan(0);
+  });
+
+  test("lags default to 0, a lag moves invoices and bills, negative lags clamp to today, old keys are ignored", async () => {
+    const o = await freshOrg("Forecast Lag Co");
+    const inv = await invoice(o, 10_000, addDays(T, 2));
+    const b = await bill(o, 4_000, addDays(T, 6));
+    let f = await get(o);
+    expect(f.assumptions).toEqual({ collection_lag_days: 0, bill_lag_days: 0, min_cash_buffer: 0 });
+    let flows = flowsOf(f);
+    expect(flows.find((x: any) => x.ref === inv.id)).toMatchObject({
+      date: addDays(T, 2),
+      due_date: addDays(T, 2),
+    });
+    expect(flows.find((x: any) => x.ref === b.id)).toMatchObject({
+      date: addDays(T, 6),
+      due_date: addDays(T, 6),
+    });
+
+    // Paying early: a bill 4 days early lands 2 days out; an invoice 4 days early lands today, not before.
+    expect(
+      (
+        await owner.json("PATCH", `${o.base}/forecast/scenarios/baseline`, {
+          assumptions: { collection_lag_days: -4, bill_lag_days: -4 },
+        })
+      ).status,
+    ).toBe(200);
+    flows = flowsOf(await get(o));
+    expect(flows.find((x: any) => x.ref === inv.id)!.date).toBe(T);
+    expect(flows.find((x: any) => x.ref === b.id)!.date).toBe(addDays(T, 2));
+    expect(
+      (
+        await owner.json("PATCH", `${o.base}/forecast/scenarios/baseline`, {
+          assumptions: { bill_lag_days: -91 },
+        })
+      ).status,
+    ).toBe(400);
+
+    // A shift override moves the expected date and never the due date.
+    const sc = (await owner.json("POST", `${o.base}/forecast/scenarios`, { name: "Late payer" })).body;
+    await owner.json("POST", `${o.base}/forecast/overrides`, {
+      scenario_id: sc.id,
+      target_type: "invoice",
+      target_id: inv.id,
+      action: "shift",
+      shift_days: 10,
+    });
+    const shifted = flowsOf(await get(o, `?scenario_id=${sc.id}`)).find((x: any) => x.ref === inv.id);
+    expect(shifted).toMatchObject({ date: addDays(T, 10), due_date: addDays(T, 2) });
+
+    // Stored assumptions from before the late share was dropped still read: the old keys are ignored.
+    const h = await env.ctx.orgs.mustOpen(o.id);
+    await h.write((tx) =>
+      tx
+        .update(org.forecastScenarios)
+        .set({
+          assumptionsJson: JSON.stringify({ collection_lag_days: 1, late_share_pct: 50, late_days: 30 }),
+        })
+        .where(eq(org.forecastScenarios.isBaseline, true)),
+    );
+    f = await get(o);
+    expect(f.assumptions).toEqual({ collection_lag_days: 1, bill_lag_days: 0, min_cash_buffer: 0 });
+    expect(flowsOf(f).filter((x: any) => x.ref === inv.id)).toHaveLength(1);
+    const baseline = (await owner.json("GET", `${o.base}/forecast/scenarios`)).body.data[0];
+    expect(baseline.assumptions).toEqual({ collection_lag_days: 1 });
   });
 
   test("a payment waiting in review leaves the invoice's open balance, so it isn't counted twice", async () => {
@@ -697,7 +778,11 @@ describe(`forecast over MCP and owner draws (${DB_MODE})`, () => {
       rationale: "The owner asked for a draw",
     });
     expect(r.isError).toBe(false);
-    expect(r.structuredContent).toMatchObject({ status: "pending_review", exceeds_capacity: false });
+    expect(r.structuredContent).toMatchObject({
+      draw: { status: "pending_review" },
+      reserve_payments: [],
+      exceeds_capacity: false,
+    });
     const snap = r.structuredContent.forecast_snapshot;
     expect(snap).toMatchObject({
       opening_cash: 200_000,
@@ -706,9 +791,10 @@ describe(`forecast over MCP and owner draws (${DB_MODE})`, () => {
     });
     expect(snap.draw_capacity.amount).toBe(200_000);
 
-    const review = (await owner.json("GET", `${o.base}/review/${r.structuredContent.review_item_id}`)).body;
+    const review = (await owner.json("GET", `${o.base}/review/${r.structuredContent.draw.review_item_id}`))
+      .body;
     expect(review.payload.forecast_snapshot.draw_capacity.amount).toBe(200_000);
-    const entryRow = (await owner.json("GET", `${o.base}/entries/${r.structuredContent.entry_id}`)).body;
+    const entryRow = (await owner.json("GET", `${o.base}/entries/${r.structuredContent.draw.entry_id}`)).body;
     expect(entryRow).toMatchObject({
       source_type: "owner_draw",
       status: "pending_review",
@@ -738,7 +824,8 @@ describe(`forecast over MCP and owner draws (${DB_MODE})`, () => {
     expect(r.status).toBe(201);
     expect(r.body.exceeds_capacity).toBe(true);
     expect(r.body.forecast_snapshot.draw_capacity.amount).toBe(200_000);
-    expect(r.body.entry.source_type).toBe("owner_draw");
+    expect(r.body.draw.entry.source_type).toBe("owner_draw");
+    expect(r.body.payments).toEqual([]);
     expect(
       (
         await viewer.json("POST", `${o2.base}/forecast/draws`, {
@@ -748,6 +835,84 @@ describe(`forecast over MCP and owner draws (${DB_MODE})`, () => {
         })
       ).status,
     ).toBe(403);
+  });
+});
+
+describe(`owner draws that reimburse the owner (${DB_MODE})`, () => {
+  test("reimburse_owner: one entry debits Due to Owner and Owner Draw and credits the bank; checked against the balance", async () => {
+    const o = await freshOrg("Forecast Reimburse Co");
+    const dueTo = o.acct["2400"]!;
+    // Mileage the owner paid personally: the business owes 8,000.
+    await entry(o, T, [
+      [o.acct["6090"]!, 8_000],
+      [dueTo, -8_000],
+    ]);
+    const post = (b: Record<string, unknown>) =>
+      owner.json("POST", `${o.base}/forecast/draws`, { date: T, bank_account_id: o.bank, ...b });
+    const r = await post({ amount: 10_000, reimburse_owner: { account_id: dueTo, amount: 5_000 } });
+    expect(r.status).toBe(201);
+    expect(r.body.payments).toEqual([]);
+    const e = r.body.draw.entry;
+    expect(e).toMatchObject({ source_type: "owner_draw", memo: "Owner reimbursement and draw" });
+    const ownerDraw = (await owner.json("GET", `${o.base}/accounts`)).body.data.find(
+      (a: any) => a.system_key === "owner_draw",
+    ).id;
+    expect(e.lines.map((l: any) => [l.account_id, l.amount])).toEqual([
+      [dueTo, 5_000],
+      [ownerDraw, 5_000],
+      [o.acct["1000"], -10_000],
+    ]);
+
+    // Only the reimbursement: no Owner Draw line.
+    const all = await post({ amount: 3_000, reimburse_owner: { account_id: dueTo, amount: 3_000 } });
+    expect(all.status).toBe(201);
+    expect(all.body.draw.entry.memo).toBe("Owner reimbursement");
+    expect(all.body.draw.entry.lines.map((l: any) => l.account_id)).toEqual([dueTo, o.acct["1000"]]);
+
+    // More than the account owes (8,000 less what posted above), more than the draw, or not a liability.
+    const owed = -(await owner.json("GET", `${o.base}/accounts?include_balances=true`)).body.data.find(
+      (a: any) => a.id === dueTo,
+    ).balance;
+    expect(owed).toBeGreaterThanOrEqual(0);
+    const over = await post({ amount: 20_000, reimburse_owner: { account_id: dueTo, amount: owed + 1 } });
+    expect(over.status).toBe(422);
+    expect(over.body.error.code).toBe("invalid_amount");
+    expect(over.body.error.message).toContain((owed / 100).toFixed(2));
+    const big = await post({ amount: 1_000, reimburse_owner: { account_id: dueTo, amount: 2_000 } });
+    expect(big.status).toBe(422);
+    expect(big.body.error.code).toBe("invalid_amount");
+    const notLiability = await post({
+      amount: 1_000,
+      reimburse_owner: { account_id: o.acct["1000"], amount: 500 },
+    });
+    expect(notLiability.status).toBe(422);
+    expect(notLiability.body.error.code).toBe("invalid_account");
+  });
+
+  test("a repayment waiting in review counts against what the account still owes", async () => {
+    const o = await freshOrg("Forecast Reimburse Pending Co");
+    const dueTo = o.acct["2400"]!;
+    // Four posted expenses under the review threshold: the business owes 4,000.00.
+    for (let i = 0; i < 4; i++)
+      await entry(o, T, [
+        [o.acct["6090"]!, 100_000],
+        [dueTo, -100_000],
+      ]);
+    const post = (amount: number) =>
+      owner.json("POST", `${o.base}/forecast/draws`, {
+        date: T,
+        bank_account_id: o.bank,
+        amount,
+        reimburse_owner: { account_id: dueTo, amount },
+      });
+    // Over the review threshold, so it waits in review.
+    const first = await post(300_000);
+    expect(first.status).toBe(201);
+    expect(first.body.draw.status).toBe("pending_review");
+    const second = await post(200_000);
+    expect(second.status).toBe(422);
+    expect(second.body.error.message).toContain("1000.00");
+    expect((await post(100_000)).status).toBe(201);
   });
 });
 

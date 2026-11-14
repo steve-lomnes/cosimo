@@ -39,6 +39,7 @@ import {
   useScenarios,
   useWindows,
 } from "../lib/forecast";
+import { flowMatches, parseQuery } from "../lib/forecast-search";
 import { centsToDecimal, fmtDate, money, todayIso, tryParseCents } from "../lib/format";
 import { useAccounts } from "../lib/ledger";
 import { useOrgId, useRole } from "../lib/org";
@@ -48,6 +49,7 @@ import { ForecastTabs } from "./reserves";
 export const validateForecastSearch = (s: Record<string, unknown>) => ({
   scenario: typeof s.scenario === "string" && s.scenario ? s.scenario : undefined,
   window: typeof s.window === "string" && s.window ? s.window : undefined,
+  view: s.view === "periods" ? ("periods" as const) : undefined,
 });
 
 type Dialog =
@@ -66,7 +68,7 @@ export function ForecastPage() {
   const orgId = useOrgId();
   const { canWrite } = useRole();
   const navigate = useNavigate();
-  const search = useSearch({ strict: false }) as { scenario?: string; window?: string };
+  const search = useSearch({ strict: false }) as { scenario?: string; window?: string; view?: "periods" };
   const scenarios = useScenarios(orgId);
   const windows = useWindows(orgId);
   const baseline = scenarios.data?.find((s) => s.is_baseline);
@@ -79,11 +81,11 @@ export function ForecastPage() {
   const [dialog, setDialog] = useState<Dialog>(null);
   const close = () => setDialog(null);
 
-  const go = (next: { scenario?: string; window?: string }) =>
+  const go = (next: { scenario?: string; window?: string; view?: "periods" }) =>
     navigate({
       to: "/o/$orgId/forecast",
       params: { orgId },
-      search: { scenario: search.scenario, window: search.window, ...next } as never,
+      search: { scenario: search.scenario, window: search.window, view: search.view, ...next } as never,
     });
 
   const allItems = useMemo(
@@ -201,12 +203,24 @@ export function ForecastPage() {
           <Card title="Projected cash">
             <BalanceChart f={f} />
           </Card>
-          <BucketTable
-            f={f}
-            canWrite={canWrite}
-            scenarioId={scenarioId}
-            onShift={(flow) => setDialog({ kind: "shift", flow })}
-          />
+          {search.view === "periods" ? (
+            <BucketTable
+              f={f}
+              canWrite={canWrite}
+              scenarioId={scenarioId}
+              onShift={(flow) => setDialog({ kind: "shift", flow })}
+              viewToggle={<ViewToggle view="periods" onChange={(v) => go({ view: v })} />}
+            />
+          ) : (
+            <TransactionList
+              f={f}
+              items={allItems}
+              canWrite={canWrite}
+              scenarioId={scenarioId}
+              onEditItem={(item) => setDialog({ kind: "item", item })}
+              viewToggle={<ViewToggle view="list" onChange={(v) => go({ view: v })} />}
+            />
+          )}
           <AttentionPanel
             f={f}
             items={allItems}
@@ -463,11 +477,13 @@ function BucketTable({
   canWrite,
   scenarioId,
   onShift,
+  viewToggle,
 }: {
   f: Forecast;
   canWrite: boolean;
   scenarioId: string | undefined;
   onShift: (flow: ForecastFlow) => void;
+  viewToggle: React.ReactNode;
 }) {
   const orgId = useOrgId();
   const [open, setOpen] = useState<Set<number>>(new Set());
@@ -490,7 +506,7 @@ function BucketTable({
   });
   const cur = f.currency;
   return (
-    <Card title="By period">
+    <Card title="By period" actions={viewToggle}>
       <ErrorText error={exclude.error} />
       <Table>
         <thead>
@@ -595,6 +611,520 @@ function BucketTable({
 }
 
 // ----------------------------------------------------------------------------- needs attention
+
+// ----------------------------------------------------------------------------- transactions
+
+function ViewToggle({ view, onChange }: { view: "list" | "periods"; onChange: (v?: "periods") => void }) {
+  const opt = (v: "list" | "periods", label: string) => (
+    <button
+      type="button"
+      aria-pressed={view === v}
+      onClick={() => onChange(v === "periods" ? "periods" : undefined)}
+      className={cx(
+        "rounded px-2.5 py-1 text-xs font-medium",
+        view === v
+          ? "bg-white shadow-sm ring-1 ring-zinc-200 dark:bg-zinc-700 dark:ring-zinc-600"
+          : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100",
+      )}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="inline-flex gap-0.5 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
+      {opt("list", "Transactions")}
+      {opt("periods", "By period")}
+    </div>
+  );
+}
+
+const SOURCE_FILTERS: ForecastFlow["source"][] = [
+  "invoice",
+  "bill",
+  "recurring",
+  "pending",
+  "planned",
+  "draw",
+  "reserve",
+];
+const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000);
+/** A planned flow's id is `item:<id>:<occurrence date>`; the shown date may be clamped to today. */
+const occurrenceOf = (flow: ForecastFlow) =>
+  flow.id.startsWith("item:") ? flow.id.split(":")[2]! : flow.date;
+
+function TransactionList({
+  f,
+  items,
+  canWrite,
+  scenarioId,
+  onEditItem,
+  viewToggle,
+}: {
+  f: Forecast;
+  items: PlannedItem[];
+  canWrite: boolean;
+  scenarioId: string | undefined;
+  onEditItem: (item: PlannedItem) => void;
+  viewToggle: React.ReactNode;
+}) {
+  const orgId = useOrgId();
+  const [query, setQuery] = useState("");
+  const [dir, setDir] = useState<"all" | "in" | "out">("all");
+  const [sources, setSources] = useState<Set<ForecastFlow["source"]>>(new Set());
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  // "/" jumps to the search box, as in the pickers' keyboard-first pages.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.key !== "/" || t.closest("input, textarea, select, [contenteditable]")) return;
+      e.preventDefault();
+      (document.getElementById("forecast-search") as HTMLInputElement | null)?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Every flow with the balance after it, over the whole forecast: filtering hides rows but never
+  // changes what the balance would be.
+  const rows = useMemo(() => {
+    let bal = f.opening_cash;
+    return f.buckets.map((b) => ({
+      bucket: b,
+      flows: b.flows.map((flow) => {
+        bal += flow.amount;
+        return { flow, balance: bal };
+      }),
+    }));
+  }, [f]);
+  const present = useMemo(() => new Set(f.buckets.flatMap((b) => b.flows.map((x) => x.source))), [f]);
+
+  const parsed = parseQuery(query);
+  const keep = (flow: ForecastFlow) =>
+    (dir === "all" || (dir === "in" ? flow.amount >= 0 : flow.amount < 0)) &&
+    (sources.size === 0 || sources.has(flow.source)) &&
+    flowMatches(flow, parsed);
+  const filtering = Boolean(query.trim()) || dir !== "all" || sources.size > 0;
+  const shown = rows.map((g) => ({ ...g, flows: g.flows.filter((r) => keep(r.flow)) }));
+  const all = rows.flatMap((g) => g.flows);
+  const hits = shown.flatMap((g) => g.flows);
+  const inTotal = hits.reduce((t, r) => t + Math.max(0, r.flow.amount), 0);
+  const outTotal = hits.reduce((t, r) => t + Math.max(0, -r.flow.amount), 0);
+  const cur = f.currency;
+  const chipBtn = (on: boolean) =>
+    cx(
+      "rounded-full px-2.5 py-0.5 text-xs ring-1",
+      on
+        ? "bg-brand-600 text-white ring-brand-600 dark:bg-gold-400 dark:text-zinc-900 dark:ring-gold-400"
+        : "text-zinc-600 ring-zinc-300 hover:bg-zinc-50 dark:text-zinc-300 dark:ring-zinc-700 dark:hover:bg-zinc-800",
+    );
+
+  return (
+    <Card title="Transactions" actions={viewToggle}>
+      <div className="mb-3 space-y-2">
+        <Input
+          id="forecast-search"
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search: a name, customer, amount, date, or type. Try “rent”, “dec”, “>1000”"
+          aria-label="Search forecast transactions"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setQuery("");
+          }}
+        />
+        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filters">
+          {(["all", "in", "out"] as const).map((d) => (
+            <button
+              key={d}
+              type="button"
+              aria-pressed={dir === d}
+              className={chipBtn(dir === d)}
+              onClick={() => setDir(d)}
+            >
+              {d === "all" ? "All" : d === "in" ? "Money in" : "Money out"}
+            </button>
+          ))}
+          <span aria-hidden className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
+          {SOURCE_FILTERS.filter((s) => present.has(s)).map((s) => (
+            <button
+              key={s}
+              type="button"
+              aria-pressed={sources.has(s)}
+              className={chipBtn(sources.has(s))}
+              onClick={() =>
+                setSources((cur) => {
+                  const next = new Set(cur);
+                  if (!next.delete(s)) next.add(s);
+                  return next;
+                })
+              }
+            >
+              {SOURCE_CHIP[s]}
+            </button>
+          ))}
+          {filtering && (
+            <button
+              type="button"
+              className="ml-1 text-xs text-zinc-500 underline hover:text-zinc-800 dark:hover:text-zinc-200"
+              onClick={() => {
+                setQuery("");
+                setDir("all");
+                setSources(new Set());
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-zinc-500" aria-live="polite">
+          {filtering ? `${hits.length} of ${all.length} · ` : `${all.length} transactions · `}
+          in {money(inTotal, cur)} · out {money(outTotal, cur)}
+          {filtering && " · balances are for the whole forecast"}
+        </p>
+      </div>
+      {hits.length === 0 ? (
+        <Empty title={filtering ? "Nothing matches." : "Nothing expected in this window."}>
+          {filtering ? "Try fewer words, or clear the filters." : "Add a planned item, or a longer window."}
+        </Empty>
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <th className={cx(th, "w-16 sm:w-28")}>Date</th>
+              <th className={th}>Item</th>
+              <th className={cx(th, "text-right")}>Amount</th>
+              <th className={cx(th, "hidden text-right sm:table-cell")}>Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map(({ bucket, flows }) =>
+              flows.length === 0 ? null : (
+                <Fragment key={bucket.start}>
+                  <tr className="bg-zinc-50 dark:bg-zinc-800/40">
+                    <td colSpan={4} className="px-3 py-1.5 text-xs text-zinc-500">
+                      <div className="flex justify-between gap-3">
+                        <span className="font-medium whitespace-nowrap">
+                          {f.window.bucket === "week" ? shortWeekLabel(bucket) : bucketLabel(bucket, "month")}
+                        </span>
+                        <span className="whitespace-nowrap">ends {money(bucket.ending, cur)}</span>
+                      </div>
+                    </td>
+                  </tr>
+                  {flows.map(({ flow, balance }) => {
+                    const open = openId === flow.id;
+                    return (
+                      <Fragment key={flow.id}>
+                        <tr
+                          className={cx(
+                            "border-t border-zinc-100 dark:border-zinc-800",
+                            open && "bg-brand-50/50 dark:bg-zinc-800/50",
+                          )}
+                        >
+                          <td className={cx(td, "whitespace-nowrap text-zinc-600 dark:text-zinc-400")}>
+                            <span className="sm:hidden">
+                              {shortWeekLabel({ start: flow.date, end: flow.date })}
+                            </span>
+                            <span className="hidden sm:inline">{fmtDate(flow.date)}</span>
+                          </td>
+                          <td className={td}>
+                            <button
+                              type="button"
+                              aria-expanded={open}
+                              onClick={() => setOpenId(open ? null : flow.id)}
+                              className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 text-left"
+                            >
+                              <SourceChipLabel flow={flow} />
+                              <span className="font-medium">{flow.label}</span>
+                              {/* The chip already says Planned or Draw; say how firm only when it adds something. */}
+                              {(FIRMNESS_LABEL[flow.firmness] !== SOURCE_CHIP[flow.source] ||
+                                flow.days_overdue) && (
+                                <span className="text-xs text-zinc-500">
+                                  {FIRMNESS_LABEL[flow.firmness] !== SOURCE_CHIP[flow.source] &&
+                                    FIRMNESS_LABEL[flow.firmness]}
+                                  {flow.days_overdue ? ` · ${flow.days_overdue} days overdue` : ""}
+                                </span>
+                              )}
+                            </button>
+                          </td>
+                          <td className={cx(td, "text-right whitespace-nowrap")}>
+                            <Amount cents={flow.amount} currency={cur} />
+                            <div className="text-xs text-zinc-500 sm:hidden">{money(balance, cur)}</div>
+                          </td>
+                          <td
+                            className={cx(
+                              td,
+                              "hidden text-right whitespace-nowrap sm:table-cell",
+                              balance < f.draw_capacity.breakdown.buffer && "text-red-600 dark:text-red-400",
+                            )}
+                          >
+                            {money(balance, cur)}
+                          </td>
+                        </tr>
+                        {open && (
+                          <tr className="bg-brand-50/50 dark:bg-zinc-800/50">
+                            <td colSpan={4} className="px-3 pb-3">
+                              <RowEditor
+                                flow={flow}
+                                item={items.find((i) => i.id === flow.ref)}
+                                orgId={orgId}
+                                canWrite={canWrite}
+                                scenarioId={scenarioId}
+                                onEditItem={onEditItem}
+                                onDone={() => setOpenId(null)}
+                              />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </Fragment>
+              ),
+            )}
+          </tbody>
+        </Table>
+      )}
+    </Card>
+  );
+}
+
+/** The chip without its link, since the whole row label is a button. */
+function SourceChipLabel({ flow }: { flow: ForecastFlow }) {
+  return <Badge tone={CHIP_TONE[flow.source]}>{SOURCE_CHIP[flow.source]}</Badge>;
+}
+
+/**
+ * Change one transaction in the open scenario. Planned items are edited directly when they belong to
+ * the scenario; a baseline item seen from a scenario is replaced there by a scenario copy, so the
+ * baseline stays as it is. A booked amount comes from its document: the scenario can move it,
+ * exclude it, or (one-off documents) swap it for a planned amount.
+ */
+function RowEditor({
+  flow,
+  item,
+  orgId,
+  canWrite,
+  scenarioId,
+  onEditItem,
+  onDone,
+}: {
+  flow: ForecastFlow;
+  item: PlannedItem | undefined;
+  orgId: string;
+  canWrite: boolean;
+  scenarioId: string | undefined;
+  onEditItem: (item: PlannedItem) => void;
+  onDone: () => void;
+}) {
+  const invalidate = useInvalidateForecast(orgId);
+  const [date, setDate] = useState(flow.date);
+  const [amount, setAmount] = useState(centsToDecimal(Math.abs(flow.amount)));
+  const cents = tryParseCents(amount);
+  const amountChanged = cents !== null && cents !== Math.abs(flow.amount);
+  const dateChanged = Boolean(date) && date !== flow.date;
+  const isItem = flow.target?.type === "forecast_item" && item;
+  const repeating = Boolean(item?.unit);
+  const ownItem = isItem && (scenarioId ? item!.scenario_id === scenarioId : true);
+  const oneOffDoc = flow.target?.type === "invoice" || flow.target?.type === "bill";
+
+  const override = (action: "exclude" | "shift", shift_days?: number) =>
+    unwrap(
+      api.POST("/api/v1/orgs/{orgId}/forecast/overrides", {
+        params: { path: { orgId } },
+        body: {
+          scenario_id: scenarioId ?? null,
+          target_type: flow.target!.type as "invoice",
+          target_id: flow.target!.id,
+          target_date: flow.target!.date ?? null,
+          action,
+          shift_days: shift_days ?? null,
+        },
+      }),
+    );
+  const addPlanned = (body: Record<string, unknown>) =>
+    unwrap(
+      api.POST("/api/v1/orgs/{orgId}/forecast/items", {
+        params: { path: { orgId } },
+        body: { scenario_id: scenarioId ?? null, ...body } as never,
+      }),
+    );
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const amt = cents ?? Math.abs(flow.amount);
+      if (isItem && ownItem) {
+        await unwrap(
+          api.PATCH("/api/v1/orgs/{orgId}/forecast/items/{id}", {
+            params: { path: { orgId, id: item!.id } },
+            body: { amount: amt, ...(repeating || !dateChanged ? {} : { start_date: date }) },
+          }),
+        );
+      } else if (isItem) {
+        // A baseline item, seen from a scenario: hide it here and put the changed copy in the scenario.
+        const it = item!;
+        await override("exclude");
+        await addPlanned({
+          kind: it.kind,
+          name: it.name,
+          direction: it.direction,
+          amount: amt,
+          unit: it.unit,
+          interval: it.interval,
+          anchor_day: it.anchor_day,
+          start_date: repeating ? it.start_date : date,
+          end_date: it.end_date,
+          max_occurrences: it.max_occurrences,
+          account_id: it.account_id,
+          contact_id: it.contact_id,
+          bank_account_id: it.bank_account_id,
+          notes: it.notes,
+        });
+      } else if (amountChanged && oneOffDoc) {
+        // A different amount for a document: the scenario sets the document aside and plans the amount.
+        await override("exclude");
+        await addPlanned({
+          name: `${flow.label} (adjusted)`,
+          direction: flow.amount >= 0 ? "in" : "out",
+          amount: amt,
+          start_date: date,
+          notes: `Replaces ${flow.label} in this scenario.`,
+        });
+      } else if (dateChanged) {
+        await override("shift", daysBetween(flow.date, date));
+      }
+    },
+    onSuccess: async () => {
+      await invalidate();
+      onDone();
+    },
+  });
+  const exclude = useMutation({
+    mutationFn: () => override("exclude"),
+    onSuccess: async () => {
+      await invalidate();
+      onDone();
+    },
+  });
+  const skip = useMutation({
+    mutationFn: () =>
+      unwrap(
+        api.POST("/api/v1/orgs/{orgId}/forecast/items/{id}/links", {
+          params: { path: { orgId, id: item!.id } },
+          body: { occurrence_date: occurrenceOf(flow), status: "skipped" },
+        }),
+      ),
+    onSuccess: async () => {
+      await invalidate();
+      onDone();
+    },
+  });
+
+  if (flow.source === "pending")
+    return (
+      <p className="pt-2 text-sm text-zinc-600 dark:text-zinc-400">
+        This is waiting in the review queue; approving or rejecting it there changes the forecast.{" "}
+        <Link to="/o/$orgId/accounting/review" params={{ orgId }} className="underline">
+          Open the review queue
+        </Link>
+      </p>
+    );
+  if (!canWrite || !flow.target)
+    return <p className="pt-2 text-sm text-zinc-500">You can view this transaction but not change it.</p>;
+
+  const where = scenarioId ? "this scenario" : "the baseline";
+  const canDate = isItem ? !repeating : true;
+  const canAmount = Boolean(isItem) || oneOffDoc;
+  const hint = isItem
+    ? repeating
+      ? `The amount applies to every occurrence${ownItem ? "" : ` in ${where}`}. To change one date, skip it and add a one-off item.`
+      : ownItem
+        ? `Changes this planned item in ${where}.`
+        : "This item is in the baseline. Saving puts a changed copy in this scenario and leaves the baseline alone."
+    : flow.source === "reserve"
+      ? `Moving the date moves this installment in ${where}. The amount comes from the reserve's rate and net income; change the rate on the Reserves tab.`
+      : flow.source === "recurring"
+        ? `Moving the date moves every occurrence of this template in ${where}. Amounts come from the template.`
+        : `A new date moves the document's expected payment in ${where}. A new amount sets the document aside in ${where} and plans the amount you enter.`;
+
+  return (
+    <div className="space-y-2 pt-2">
+      <ErrorText error={save.error ?? exclude.error ?? skip.error} />
+      <div className="flex flex-wrap items-end gap-3">
+        {canDate && (
+          <Field label="Date" className="w-40">
+            {(id) => <Input id={id} type="date" value={date} onChange={(e) => setDate(e.target.value)} />}
+          </Field>
+        )}
+        {canAmount && (
+          <Field label="Amount" className="w-36" error={cents === null ? "Enter an amount" : null}>
+            {(id) => (
+              <Input id={id} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            )}
+          </Field>
+        )}
+        <div className="flex flex-wrap gap-1.5 pb-0.5">
+          <Button
+            size="sm"
+            loading={save.isPending}
+            disabled={cents === null || !(amountChanged || dateChanged)}
+            onClick={() => save.mutate()}
+          >
+            Save
+          </Button>
+          {isItem && repeating && (
+            <Button size="sm" variant="secondary" loading={skip.isPending} onClick={() => skip.mutate()}>
+              Skip this one
+            </Button>
+          )}
+          {!(isItem && ownItem) && (
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={exclude.isPending}
+              onClick={() => exclude.mutate()}
+            >
+              Exclude in {scenarioId ? "scenario" : "baseline"}
+            </Button>
+          )}
+          {isItem && ownItem && (
+            <Button size="sm" variant="ghost" onClick={() => onEditItem(item!)}>
+              More…
+            </Button>
+          )}
+          {flow.source === "invoice" && flow.ref && (
+            <Link
+              to="/o/$orgId/sales/invoices/$invoiceId"
+              params={{ orgId, invoiceId: flow.ref }}
+              className="self-center text-xs underline"
+            >
+              Open invoice
+            </Link>
+          )}
+          {flow.source === "reserve" && (
+            <Link
+              to="/o/$orgId/forecast/reserves"
+              params={{ orgId }}
+              className="self-center text-xs underline"
+            >
+              Open reserves
+            </Link>
+          )}
+          {flow.source === "bill" && flow.ref && (
+            <Link
+              to="/o/$orgId/expenses/bills/$billId"
+              params={{ orgId, billId: flow.ref }}
+              className="self-center text-xs underline"
+            >
+              Open bill
+            </Link>
+          )}
+        </div>
+      </div>
+      <p className="text-xs text-zinc-500">{hint}</p>
+    </div>
+  );
+}
 
 function AttentionPanel({
   f,

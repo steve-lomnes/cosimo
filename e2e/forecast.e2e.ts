@@ -70,10 +70,8 @@ test("a planned item shows in its bucket and lowers Safe to draw; Didn't happen 
 
   await expect(page.getByRole("cell", { name: "Equipment lease", exact: true })).toBeVisible();
   await expect(safe).toHaveText(usd(before - 500));
-  await page.evaluate(() => {
-    for (const b of document.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')) b.click();
-  });
-  await expect(page.getByRole("row", { name: /Equipment lease.*Planned/ })).toBeVisible();
+  // The transaction list (the default view) shows it on today's date.
+  await expect(page.getByRole("row", { name: /Planned Equipment lease -\$500\.00/ })).toBeVisible();
 
   // It is past due and unlinked, so it needs attention.
   const attention = page.locator("li", { hasText: "Equipment lease was planned for a date that has passed" });
@@ -189,10 +187,7 @@ test("a reserve set up in the form shows its due date in the forecast and holds 
 
   await page.getByRole("tab", { name: "Forecast" }).click();
   await expect(safe).toHaveText(usd(2750));
-  await page.evaluate(() => {
-    for (const b of document.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')) b.click();
-  });
-  await expect(page.getByRole("row", { name: /Owner taxes: Federal.*Reserve/ })).toBeVisible();
+  await expect(page.getByRole("row", { name: /Reserve Owner taxes: Federal/ })).toBeVisible();
 
   // Paid personally: only the record, and the installment shrinks by it.
   await page.getByRole("tab", { name: "Reserves" }).click();
@@ -207,4 +202,46 @@ test("a reserve set up in the form shows its due date in the forecast and holds 
   await expect(card.getByText("Paid personally")).toBeVisible();
   await page.getByRole("tab", { name: "Forecast" }).click();
   await expect(safe).toHaveText(usd(2850));
+});
+
+test("the transaction list: search anywhere, change a planned item in its row, and switch to By period", async ({
+  page,
+}) => {
+  await signIn(page);
+  const id = orgId(page);
+  const soon = (n: number) => iso(new Date(Date.now() + n * 86_400_000));
+  for (const it of [
+    { name: "Studio rent", direction: "out", amount: 210_000, start_date: soon(5) },
+    { name: "Workshop fee", direction: "in", amount: 75_000, start_date: soon(9) },
+  ])
+    expect((await api(page, "POST", `/api/v1/orgs/${id}/forecast/items`, it)).status).toBe(201);
+
+  await page.goto(`/o/${id}/forecast`);
+  const list = page.locator("section", { has: page.getByRole("heading", { name: "Transactions" }) });
+  await expect(list.getByRole("row", { name: /Studio rent/ })).toBeVisible();
+
+  // "/" focuses the search; every word must match somewhere, and >N bounds the size.
+  await page.keyboard.press("/");
+  await expect(page.getByLabel("Search forecast transactions")).toBeFocused();
+  await page.keyboard.type("workshop");
+  await expect(list.getByRole("row", { name: /Workshop fee/ })).toBeVisible();
+  await expect(list.getByRole("row", { name: /Studio rent/ })).toHaveCount(0);
+  await page.getByLabel("Search forecast transactions").fill(">1000 out");
+  await expect(list.getByRole("row", { name: /Studio rent/ })).toBeVisible();
+  await expect(list.getByRole("row", { name: /Workshop fee/ })).toHaveCount(0);
+  await list.getByRole("button", { name: "Clear" }).click();
+
+  // Change the amount in the row; the item itself changes.
+  await list.getByRole("button", { name: /Studio rent/ }).click();
+  await list.getByLabel("Amount").fill("2300");
+  await list.getByRole("button", { name: "Save" }).click();
+  await expect(list.getByRole("row", { name: /Studio rent -\$2,300\.00/ })).toBeVisible();
+
+  // The period view is still there.
+  await list.getByRole("button", { name: "By period" }).click();
+  await expect(page.getByRole("heading", { name: "By period" })).toBeVisible();
+  await page.getByRole("button", { name: "Transactions" }).click();
+
+  for (const n of ["Studio rent", "Workshop fee"])
+    await page.getByRole("button", { name: `Archive ${n}` }).click();
 });

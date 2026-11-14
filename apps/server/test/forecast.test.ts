@@ -208,7 +208,11 @@ describe(`forecast flows and scenarios (${DB_MODE})`, () => {
     // The low point is the opening balance until money comes in; the pending inflow lifts it.
     expect(f.low_point.balance).toBeLessThanOrEqual(200_000);
     expect(f.buckets.at(-1).ending).toBe(f.buckets.reduce((s: number, x: any) => s + x.net, 0) + 200_000);
-    expect(f.draw_capacity.breakdown).toEqual({ low_point: f.low_point.balance, buffer: 0 });
+    expect(f.draw_capacity.breakdown).toEqual({
+      low_point: f.low_point.balance,
+      buffer: 0,
+      reserves_not_in_window: 0,
+    });
     // Totals reconcile: inflow minus outflow of the buckets equals the last ending less the opening.
     expect(f.drivers.length).toBeGreaterThan(0);
   });

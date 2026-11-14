@@ -154,6 +154,15 @@ async function pnlPeriods(
   return periods;
 }
 
+/**
+ * The profit and loss report's "Net Income" for a range, read the way the dashboard reads it, but
+ * without the chain head a full report carries (reserves read it on every forecast).
+ */
+export async function netIncome(db: Reader, from: string, to: string, basis: Basis): Promise<number> {
+  const r = profitAndLoss(await accountInfos(db), await pnlPeriods(db, from, to, undefined, basis));
+  return r.lines.find((l) => l.depth === 0 && l.label === "Net Income")?.values[0] ?? 0;
+}
+
 async function bsColumn(db: Reader, asOf: string, fyStartMonth: number, basis: Basis) {
   const fyStart = fiscalYearStart(asOf, fyStartMonth);
   return {

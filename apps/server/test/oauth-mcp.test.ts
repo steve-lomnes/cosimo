@@ -592,6 +592,9 @@ describe("MCP", () => {
       "archive_planned_item",
       "set_forecast_override",
       "propose_owner_draw",
+      "get_reserves",
+      "propose_reserve_true_up",
+      "record_reserve_payment",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])

@@ -122,3 +122,89 @@ test("a scenario holds its own plan: the baseline is unchanged", async ({ page }
   await page.getByRole("button", { name: "Archive", exact: true }).click();
   await expect(page.getByLabel("Scenario").locator("option:checked")).toHaveText("Baseline");
 });
+
+test("a reserve set up in the form shows its due date in the forecast and holds back Safe to draw", async ({
+  page,
+}) => {
+  await signIn(page);
+  // Its own org: the income it books must not change the shared org's reports.
+  const made = await api(page, "POST", "/api/v1/orgs", { name: "Reserve E2E LLC" });
+  expect(made.status).toBeLessThan(300);
+  const id = made.body.id as string;
+  const accts = await api(page, "GET", `/api/v1/orgs/${id}/accounts`);
+  const code = (c: string) => accts.body.data.find((a: { code: string }) => a.code === c).id;
+  await api(page, "POST", `/api/v1/orgs/${id}/bank-accounts`, {
+    name: "Reserve Checking",
+    kind: "checking",
+    ledger_account_id: code("1000"),
+  });
+  const today = iso(new Date());
+  for (const [account, amount] of [
+    ["3100", -200_000],
+    ["4000", -100_000],
+  ] as const) {
+    const r = await api(page, "POST", `/api/v1/orgs/${id}/entries`, {
+      date: today,
+      memo: "Reserve e2e",
+      lines: [
+        { account_id: code("1000"), amount: -amount },
+        { account_id: code(account), amount },
+      ],
+    });
+    expect(r.status).toBeLessThan(300);
+  }
+
+  await page.goto(`/o/${id}/forecast`);
+  const safe = page.getByTestId("safe-to-draw");
+  await expect(safe).toHaveText(usd(3000));
+
+  await page.getByRole("tab", { name: "Reserves" }).click();
+  await expect(page).toHaveURL(/\/forecast\/reserves$/);
+  await expect(page.getByText("No reserves yet")).toBeVisible();
+  await page.getByRole("button", { name: "New reserve" }).click();
+  const form = page.getByRole("dialog");
+  await form.getByLabel("Name", { exact: true }).fill("Owner taxes");
+  await form.getByLabel("Label").fill("Federal");
+  await form.getByLabel("Rate (%)").fill("25");
+  // The preset fills the four US estimate dates; replace them with one 20 days out.
+  await form.getByRole("button", { name: "US quarterly estimates" }).click();
+  await expect(form.getByRole("button", { name: /^Remove / })).toHaveCount(4);
+  await expect(form.getByRole("button", { name: "Remove Jan 15 (following year)" })).toBeVisible();
+  for (let i = 0; i < 4; i++)
+    await form
+      .getByRole("button", { name: /^Remove / })
+      .first()
+      .click();
+  await form.getByRole("button", { name: "Add date" }).click();
+  const due = new Date(Date.now() + 20 * 86_400_000);
+  await form.getByLabel("Federal due date 1 month").selectOption(String(due.getUTCMonth() + 1));
+  await form.getByLabel("Federal due date 1 day").fill(String(due.getUTCDate()));
+  if (due.getUTCFullYear() !== new Date().getUTCFullYear()) await form.getByLabel("Following year").check();
+  await form.getByRole("button", { name: "Create reserve" }).click();
+  await expect(form).toBeHidden();
+
+  const card = page.locator("section", { hasText: "Owner taxes" });
+  await expect(card.getByRole("cell", { name: "Federal (25%)" })).toBeVisible();
+  await expect(card.getByRole("cell", { name: usd(250) }).first()).toBeVisible();
+
+  await page.getByRole("tab", { name: "Forecast" }).click();
+  await expect(safe).toHaveText(usd(2750));
+  await page.evaluate(() => {
+    for (const b of document.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')) b.click();
+  });
+  await expect(page.getByRole("row", { name: /Owner taxes: Federal.*Reserve/ })).toBeVisible();
+
+  // Paid personally: only the record, and the installment shrinks by it.
+  await page.getByRole("tab", { name: "Reserves" }).click();
+  await card.getByRole("button", { name: "Record payment" }).click();
+  const pay = page.getByRole("dialog");
+  await expect(pay.getByLabel("Amount")).toHaveValue("250.00");
+  await pay.getByLabel("Amount").fill("100");
+  await pay.getByRole("button", { name: "Record payment" }).click();
+  await expect(pay.getByText(/Recorded. No entry/)).toBeVisible();
+  await pay.locator("footer").getByRole("button", { name: "Close" }).click();
+  await card.getByRole("button", { name: /Payments for/ }).click();
+  await expect(card.getByText("Paid personally")).toBeVisible();
+  await page.getByRole("tab", { name: "Forecast" }).click();
+  await expect(safe).toHaveText(usd(2850));
+});

@@ -503,6 +503,32 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   item's payload, so the reviewer sees what the draw was weighed against and the client can't
   misstate it. A draw over capacity is proposed, with `exceeds_capacity` set, rather than refused:
   the owner decides what to draw. `owner_draw` is its own `source_type`.
+- **Cosimo doesn't compute tax; reserves do the arithmetic the person sets up** (#114): tax return
+  preparation is a non-goal, and tax rules differ by entity, state, and year. A reserve is a general
+  earmark (rate × net income for the tax year to date), so tax set aside is one use of it and the
+  rates and due dates are the person's. Nothing on the server knows a US date; "US quarterly
+  estimates" is a preset button in the web form.
+- **Reserves have parts** (#114): federal and state estimates (or any other split) have different
+  rates and due dates, and in book mode each needs its own liability account, because booked
+  totals are read per account from the journal. Two parts can't share one account.
+- **Track and book modes** (#114): many owners only want to know what to hold back, so `track`
+  reports and books nothing until a payment. `book` records the set-aside as a liability through
+  true-up entries (target − booked), which go through review like any entry. Booked totals come
+  from the journal itself (this reserve's true-ups and their reversals, posted or pending, dated in
+  the tax year), not a stored running total, so a rejected or reversed true-up corrects itself.
+- **A declared distribution payable in its own liability account, not Due to Owner (2400)**
+  (#114): 2400 is money the business owes the owner for spending they covered. Mixing a tax
+  distribution into it would make the owner's reimbursements and the tax set-aside impossible to
+  tell apart. The charge account defaults to Owner Draw (the set-aside is a distribution); a C
+  corporation would choose an income tax expense account.
+- **Reserve payments are recorded explicitly, with their tax year** (#114): an estimated payment made
+  in January usually belongs to the year before, which no date rule can tell. A payment from a bank
+  account proposes its entry and the record stays tied to it: rejecting the entry removes the
+  payment (audited), and one whose entry posted is deleted only after the entry is reversed. A
+  payment made personally after a draw is just the record in track mode. In book mode it proposes
+  debit the liability, credit the charge account: the earlier draw settled the declared
+  distribution, so without it the liability would stay on the balance sheet and equity would carry
+  the distribution twice (once from the true-up, once from the draw).
 - **Forecast uniqueness columns use '' rather than NULL** (#113): SQLite treats NULLs as distinct in
   a unique index, and drizzle-kit mangles expression indexes. `forecast_overrides.target_date` and
   `forecast_links.target_id` are not null and hold '' when there is none; the API shows null.

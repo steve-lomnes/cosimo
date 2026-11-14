@@ -11,4 +11,5 @@ export * from "./policy.ts";
 export * from "./receipts.ts";
 export * from "./recurrence.ts";
 export * from "./reports.ts";
+export * from "./reserves.ts";
 export * from "./tsa-roots.ts";

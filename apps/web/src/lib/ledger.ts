@@ -63,6 +63,8 @@ export const SOURCE_LABEL: Record<string, string> = {
   import: "Import",
   reversal: "Reversal",
   owner_draw: "Owner draw",
+  reserve_true_up: "Reserve true-up",
+  reserve_payment: "Reserve payment",
 };
 
 export const DOCUMENT_SOURCES = ["invoice", "invoice_payment", "bill", "bill_payment"];

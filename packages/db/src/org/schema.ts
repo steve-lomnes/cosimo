@@ -847,6 +847,99 @@ export const forecastWindows = sqliteTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// Reserves (#114)
+// ---------------------------------------------------------------------------
+
+/**
+ * A reserve: money earmarked as a rate of a base (net income) for each tax year, such as tax set
+ * aside. Cosimo never computes tax; the rates and due dates are the person's. `track` mode only
+ * reports the target; `book` mode also books it as a liability with true-up entries (Dr
+ * `charge_account_id`, Owner Draw when null / Cr each part's liability account). The tax year starts
+ * in `tax_year_start_month` and is named by the calendar year it starts in.
+ */
+export const reserves = sqliteTable(
+  "reserves",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    mode: text("mode", { enum: ["track", "book"] })
+      .notNull()
+      .default("track"),
+    base: text("base", { enum: ["net_income"] })
+      .notNull()
+      .default("net_income"),
+    taxYearStartMonth: integer("tax_year_start_month").notNull().default(1),
+    chargeAccountId: text("charge_account_id").references(() => accounts.id),
+    trueUpSchedule: text("true_up_schedule", { enum: ["manual", "monthly"] })
+      .notNull()
+      .default("manual"),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(now),
+    updatedAt: text("updated_at").notNull().default(now),
+    archivedAt: text("archived_at"),
+  },
+  (t) => [
+    check("reserves_mode_ck", sql`${t.mode} in ('track','book')`),
+    check("reserves_base_ck", sql`${t.base} in ('net_income')`),
+    check("reserves_month_ck", sql`${t.taxYearStartMonth} between 1 and 12`),
+    check("reserves_schedule_ck", sql`${t.trueUpSchedule} in ('manual','monthly')`),
+  ],
+);
+
+/**
+ * One part of a reserve: its rate (basis points of the base) and due dates, as JSON
+ * `[{ month, day, year_offset }]` (`year_offset` 1 is the year after the tax year). In book mode it
+ * has its own liability account.
+ */
+export const reserveParts = sqliteTable(
+  "reserve_parts",
+  {
+    id: text("id").primaryKey(),
+    reserveId: text("reserve_id")
+      .notNull()
+      .references(() => reserves.id),
+    label: text("label").notNull(),
+    rateBp: integer("rate_bp").notNull(),
+    dueDatesJson: text("due_dates_json").notNull().default("[]"),
+    liabilityAccountId: text("liability_account_id").references(() => accounts.id),
+    position: integer("position").notNull().default(0),
+    archivedAt: text("archived_at"),
+  },
+  (t) => [
+    index("reserve_parts_reserve_idx").on(t.reserveId),
+    check("reserve_parts_rate_ck", sql`${t.rateBp} between 0 and 10000`),
+  ],
+);
+
+/**
+ * A payment toward a reserve part, attributed to a tax year by the person (a January payment can
+ * belong to the year before). Paid from a bank account it has a `reserve_payment` entry
+ * (`entry_id`); paid personally it is only this record.
+ */
+export const reservePayments = sqliteTable(
+  "reserve_payments",
+  {
+    id: text("id").primaryKey(),
+    partId: text("part_id")
+      .notNull()
+      .references(() => reserveParts.id),
+    taxYear: integer("tax_year").notNull(),
+    date: text("date").notNull(),
+    amount: integer("amount").notNull(),
+    entryId: text("entry_id").references(() => journalEntries.id),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    index("reserve_payments_part_idx").on(t.partId, t.taxYear),
+    index("reserve_payments_entry_idx").on(t.entryId),
+    check("reserve_payments_amount_pos", sql`${t.amount} > 0`),
+  ],
+);
+
 export const csvProfiles = sqliteTable("csv_profiles", {
   id: text("id").primaryKey(),
   bankAccountId: text("bank_account_id")

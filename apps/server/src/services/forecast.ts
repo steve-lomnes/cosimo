@@ -11,7 +11,8 @@
  *   A named scenario holds only its changes on top of the baseline: its own planned items,
  *   overrides of other items, and assumption overrides.
  * - Flows come from separate gatherers (`invoiceFlows`, `billFlows`, `templateFlows`,
- *   `pendingEntryFlows`, `plannedFlows`) so another source (reserves) can add its own.
+ *   `pendingEntryFlows`, `plannedFlows`, and reserves' installments from services/reserves.ts).
+ *   What a reserve owes now that the window doesn't pay is held back from draw capacity.
  * - Matching a planned occurrence to an actual invoice, bill, or bank transaction is only ever
  *   suggested; a person (or assistant, in its own scenario) acts on it by creating a link.
  * - An agent (anything but a user) writes only to a scenario its own client created
@@ -34,6 +35,7 @@ import {
   itemOccurrences,
   MAX_FORECAST_PERIODS,
   occurrence,
+  reservesNotInWindow,
   type Schedule,
   splitLate,
 } from "@cosimo/core";
@@ -48,6 +50,14 @@ import { mustGetContact } from "./contacts.ts";
 import { openBalance } from "./documents.ts";
 import { accountMap, type SubmitResult, submitEntryTx, systemAccountId } from "./ledger.ts";
 import { bodyOf, scheduleOf, templateTotal } from "./recurring.ts";
+import {
+  type PaymentView,
+  pendingTrueUp,
+  proposeReserveTrueUpTx,
+  recordReservePaymentTx,
+  reserveForecastInputs,
+  reservesNeedingTrueUp,
+} from "./reserves.ts";
 
 type Reader = OrgDb | OrgTx;
 export type ScenarioRow = typeof org.forecastScenarios.$inferSelect;
@@ -893,8 +903,11 @@ async function assertTargetExists(tx: Reader, type: OverrideTarget, id: string) 
                 .from(org.forecastItems)
                 .where(eq(org.forecastItems.id, id))
                 .get()
-            : // reserve_part: checked by the reserves module once it exists.
-              { id };
+            : await tx
+                .select({ id: org.reserveParts.id })
+                .from(org.reserveParts)
+                .where(eq(org.reserveParts.id, id))
+                .get();
   if (!found) throw notFound("The item to override");
 }
 
@@ -1697,6 +1710,7 @@ export async function forecast(db: Reader, q: ForecastQuery = {}, asOf = today()
 
   const inv = await invoiceFlows(c);
   const planned = await plannedFlows(c, ov.items);
+  const reserves = await reserveForecastInputs(db, asOf);
   const flows = applyOverrides(
     [
       ...inv.flows,
@@ -1704,6 +1718,7 @@ export async function forecast(db: Reader, q: ForecastQuery = {}, asOf = today()
       ...(await templateFlows(c)),
       ...(await pendingEntryFlows(c)),
       ...planned.flows,
+      ...reserves.flows,
     ],
     ov.overrides,
   );
@@ -1713,6 +1728,8 @@ export async function forecast(db: Reader, q: ForecastQuery = {}, asOf = today()
     openingCash: cash.total,
     flows,
     assumptions: ov.assumptions,
+    // After overrides: an excluded or shifted installment is still owed.
+    reservesNotInWindow: reservesNotInWindow(reserves.owed, flows, c.end),
   });
 
   const suggestions = await suggestMatches(c, planned.open);
@@ -1767,10 +1784,25 @@ export function forecastSnapshot(f: ForecastResult, amount: number) {
 
 export type ForecastSnapshot = ReturnType<typeof forecastSnapshot>;
 
+/** A true-up proposed alongside an owner draw (`include_true_ups`). */
+export interface DrawTrueUp {
+  reserve_id: string;
+  result: SubmitResult | null;
+  /** Why none was proposed: one is already pending. */
+  skipped: string | null;
+}
+
 /**
  * Propose an owner draw: Dr Owner Draw / Cr the bank account's ledger account, through the review
  * policy, with the forecast the server computed attached to the review item. A draw over capacity
  * is never refused; the result says so.
+ *
+ * - `pay_reserve` makes the draw a payment toward a reserve part instead
+ *   (`recordReservePaymentTx`, from the bank account).
+ * - `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount
+ *   differs from its target today, each a separate entry; one already pending is skipped.
+ *
+ * The snapshot is computed before anything is proposed, and every resulting proposal carries it.
  */
 export async function proposeOwnerDrawTx(
   tx: OrgTx,
@@ -1785,14 +1817,72 @@ export async function proposeOwnerDrawTx(
     window?: WindowSpec;
     rationale?: string | null;
     lock_override_note?: string | null;
+    include_true_ups?: boolean;
+    pay_reserve?: { part_id: string; tax_year: number } | null;
   },
-): Promise<{ result: SubmitResult; forecast_snapshot: ForecastSnapshot; exceeds_capacity: boolean }> {
+): Promise<{
+  result: SubmitResult;
+  forecast_snapshot: ForecastSnapshot;
+  exceeds_capacity: boolean;
+  payment: PaymentView | null;
+  true_ups: DrawTrueUp[];
+}> {
   if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
     throw unprocessable("The draw must be a positive amount.", "invalid_amount");
   if (!isIsoDate(input.date)) throw unprocessable("Enter a valid date.", "invalid_date");
   const bank = await mustGetBankAccount(tx, input.bank_account_id);
   const f = await forecast(tx, { scenario_id: input.scenario_id, ...input.window });
   const snapshot = forecastSnapshot(f, input.amount);
+  const reviewContext = { forecast_snapshot: snapshot };
+  const true_ups: DrawTrueUp[] = [];
+  if (input.include_true_ups) {
+    // As of today: net income is known only to date, whatever the draw's date.
+    const asOf = today();
+    for (const reserveId of await reservesNeedingTrueUp(tx, asOf)) {
+      if (await pendingTrueUp(tx, reserveId)) {
+        true_ups.push({
+          reserve_id: reserveId,
+          result: null,
+          skipped: "A true-up is already waiting in review.",
+        });
+        continue;
+      }
+      const r = await proposeReserveTrueUpTx(
+        tx,
+        orgId,
+        a,
+        reserveId,
+        { as_of: asOf, rationale: input.rationale ?? null },
+        { reviewContext },
+      );
+      true_ups.push({ reserve_id: reserveId, result: r, skipped: null });
+    }
+  }
+  if (input.pay_reserve) {
+    const paid = await recordReservePaymentTx(
+      tx,
+      orgId,
+      a,
+      {
+        part_id: input.pay_reserve.part_id,
+        tax_year: input.pay_reserve.tax_year,
+        date: input.date,
+        amount: input.amount,
+        note: input.memo ?? null,
+        from_bank_account_id: bank.id,
+        rationale: input.rationale ?? null,
+        lock_override_note: input.lock_override_note ?? null,
+      },
+      { reviewContext },
+    );
+    return {
+      result: paid.result!,
+      forecast_snapshot: snapshot,
+      exceeds_capacity: snapshot.exceeds_capacity,
+      payment: paid.payment,
+      true_ups,
+    };
+  }
   const result = await submitEntryTx(
     tx,
     orgId,
@@ -1808,7 +1898,13 @@ export async function proposeOwnerDrawTx(
       rationale: input.rationale ?? null,
       lockOverrideNote: input.lock_override_note ?? null,
     },
-    { reviewContext: { forecast_snapshot: snapshot } },
+    { reviewContext },
   );
-  return { result, forecast_snapshot: snapshot, exceeds_capacity: snapshot.exceeds_capacity };
+  return {
+    result,
+    forecast_snapshot: snapshot,
+    exceeds_capacity: snapshot.exceeds_capacity,
+    payment: null,
+    true_ups,
+  };
 }

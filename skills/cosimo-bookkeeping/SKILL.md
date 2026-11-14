@@ -198,8 +198,15 @@ record, find it with `list_attachments` and link it with `link_attachment`.
    and the cash buffer.
 4. List the `attention` items, so the person can correct stale information: a planned item past
    due, an overdue invoice counted as coming in, a bank feed that hasn't synced, a card balance.
+   If the person has reserves (money set aside for tax, say; `get_reserves`), say which
+   installments fall in the window and how much `reserves_not_in_window` (in
+   `draw_capacity.breakdown`) holds back for ones due later.
 5. Offer `propose_owner_draw` for the amount they choose. A draw over capacity is still proposed, so
-   say so plainly when `exceeds_capacity` is true.
+   say so plainly when `exceeds_capacity` is true. For a book-mode reserve whose `true_up_due` isn't
+   zero, offer `include_true_ups` so the set-aside is booked with the draw. When the money is for a
+   reserve payment (an estimated tax payment from the business account), use `pay_reserve` with the
+   part and the tax year it is for, or `record_reserve_payment` on its own. Never set up or change
+   a reserve: the person does that in Cosimo, and Cosimo doesn't compute tax.
 6. Never edit the baseline. For "what if", `create_forecast_scenario` and put your changes there
    (`save_planned_item`, `set_forecast_override`); the person promotes it to make it the plan.
 

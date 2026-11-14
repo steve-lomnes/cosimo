@@ -52,6 +52,8 @@ test("no page scrolls sideways", async ({ page }) => {
     "/accounting/accounts",
     "/accounting/entries",
     "/reports",
+    "/forecast",
+    "/forecast/reserves",
     "/settings",
   ].map((p) => `${base}${p}`);
   for (const p of [...paths, "/orgs", "/account"]) {
@@ -60,6 +62,58 @@ test("no page scrolls sideways", async ({ page }) => {
     await page.waitForLoadState("networkidle");
     expect(await overflow(page), `horizontal overflow on ${p}`).toBeLessThanOrEqual(0);
   }
+});
+
+test("reserves fit a phone: the card, its payments, and the form", async ({ page }) => {
+  await signIn(page);
+  await page.goto(`${base}/forecast/reserves`);
+  await expect(page.getByRole("main")).toBeVisible();
+  const orgId = base.split("/").pop()!;
+  const r = await page.evaluate(async (orgId) => {
+    const csrf = decodeURIComponent(/(?:^|; )cosimo_csrf=([^;]*)/.exec(document.cookie)?.[1] ?? "");
+    const res = await fetch(`/api/v1/orgs/${orgId}/reserves`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-csrf-token": csrf },
+      body: JSON.stringify({
+        name: "Phone taxes",
+        parts: [
+          {
+            label: "Federal estimated tax",
+            rate_bp: 2500,
+            due_dates: [
+              { month: 4, day: 15, year_offset: 0 },
+              { month: 1, day: 15, year_offset: 1 },
+            ],
+          },
+          { label: "State", rate_bp: 500, due_dates: [{ month: 4, day: 15, year_offset: 0 }] },
+        ],
+      }),
+    });
+    return res.status;
+  }, orgId);
+  expect(r).toBe(201);
+  await page.reload();
+  const card = page.locator("section", { hasText: "Phone taxes" }).first();
+  await expect(
+    card.getByRole("list", { name: "Parts" }).getByText("Federal estimated tax (25%)"),
+  ).toBeVisible();
+  await card.getByRole("button", { name: /Payments for/ }).click();
+  await page.waitForLoadState("networkidle");
+  await shot(page, "reserves");
+  expect(await overflow(page)).toBeLessThanOrEqual(0);
+
+  await card.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("dialog").getByLabel("Mode").selectOption("book");
+  await shot(page, "reserve-form");
+  expect(await overflow(page)).toBeLessThanOrEqual(0);
+  // A dialog sits above the page, so check its scrolling body too.
+  const inDialog = await page.evaluate(() => {
+    const body = document.querySelector("dialog[open] .overflow-y-auto");
+    return body ? body.scrollWidth - body.clientWidth : 0;
+  });
+  expect(inDialog).toBeLessThanOrEqual(0);
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
 });
 
 test("drawer: user controls live in it and it closes after navigating", async ({ page }) => {

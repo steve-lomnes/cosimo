@@ -12,6 +12,7 @@ import { OpeningBalancesPage } from "./pages/ledger-settings";
 import { NewReceiptPage, ReceiptPage, ReceiptsPage, validateReceiptsSearch } from "./pages/receipts";
 import { ReconcileListPage, ReconcilePage } from "./pages/reconcile";
 import { ReportsPage, validateReportSearch } from "./pages/reports";
+import { ReservesPage } from "./pages/reserves";
 import { ReviewQueuePage } from "./pages/review";
 import { RulesPage } from "./pages/rules";
 
@@ -40,6 +41,7 @@ export function orgChildRoutes(parent: AnyRoute): AnyRoute[] {
     r("/accounting/entries/$entryId", EntryPage, msgSearch),
     r("/reports", ReportsPage, validateReportSearch),
     r("/forecast", ForecastPage, validateForecastSearch),
+    r("/forecast/reserves", ReservesPage),
     r("/banking/accounts", BankAccountsPage),
     r("/banking/import", ImportPage, (s) => ({
       account: typeof s.account === "string" ? s.account : undefined,

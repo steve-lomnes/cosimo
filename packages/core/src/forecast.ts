@@ -60,6 +60,8 @@ export interface Flow {
   last_confirmed_at?: string | null;
   /** Invoices: days past the due date today. */
   days_overdue?: number | null;
+  /** Reserves: the tax year an installment belongs to. */
+  tax_year?: number;
 }
 
 export interface ForecastOverride {
@@ -167,7 +169,8 @@ export interface LowPoint {
 
 export interface DrawCapacity {
   amount: number;
-  breakdown: { low_point: number; buffer: number };
+  /** `reserves_not_in_window`: reserve amounts owed now that no outflow in the window pays. */
+  breakdown: { low_point: number; buffer: number; reserves_not_in_window: number };
   /** The largest outflows dated on or before the low point. */
   binding: Flow[];
 }
@@ -190,6 +193,8 @@ export function buildForecast(input: {
   openingCash: number;
   flows: Flow[];
   assumptions: Pick<ForecastAssumptions, "min_cash_buffer">;
+  /** Held back from draw capacity on top of the buffer (see `reservesNotInWindow`). */
+  reservesNotInWindow?: number;
 }): ForecastCore {
   const { today, openingCash } = input;
   const ranges = bucketRanges(today, input.window.bucket, input.window.periods);
@@ -222,6 +227,7 @@ export function buildForecast(input: {
   }
 
   const buffer = Math.max(0, input.assumptions.min_cash_buffer);
+  const reserves = Math.max(0, input.reservesNotInWindow ?? 0);
   const binding = flows
     .filter((f) => f.amount < 0 && f.date <= low.date)
     .sort(byAbsDesc)
@@ -232,8 +238,8 @@ export function buildForecast(input: {
     buckets,
     low_point: low,
     draw_capacity: {
-      amount: Math.max(0, low.balance - buffer),
-      breakdown: { low_point: low.balance, buffer },
+      amount: Math.max(0, low.balance - buffer - reserves),
+      breakdown: { low_point: low.balance, buffer, reserves_not_in_window: reserves },
       binding,
     },
     drivers: [...flows].sort(byAbsDesc).slice(0, 10),

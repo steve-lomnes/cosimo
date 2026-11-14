@@ -81,6 +81,9 @@ rent. See [what Cosimo doesn't do yet](#what-cosimo-doesnt-do-yet) before you sw
 - Receipts and attachments on any transaction, stored locally or in S3-compatible storage.
 - A cash forecast (13 weeks or 12 months) built from open invoices and bills, recurring templates, and
   planned items, with what-if scenarios and a "safe to draw" figure for owner draws.
+- Reserves: set aside a share of net income each tax year (for example for the owner's tax), with
+  your own rates and due dates, payments by tax year, and optional true-up entries that book it as a
+  liability. Cosimo doesn't compute tax.
 
 **Getting paid and paying bills**
 - Invoices with your logo, emailed as PDFs over your own SMTP, with partial payments, credits, and

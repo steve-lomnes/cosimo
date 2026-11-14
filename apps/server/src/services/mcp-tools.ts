@@ -25,6 +25,9 @@ linking an existing file to a record applies directly and is audited.
  * scenarios its own connection created: the baseline is refused, and so is another connection's
  * scenario. Promoting a scenario to the baseline is for people. propose_owner_draw is a proposal
  * like any entry, with the forecast attached.
+ * Reserves (get_reserves) are configured by people only: no tool creates a reserve or changes its
+ * rates or due dates. propose_reserve_true_up is a proposal; record_reserve_payment applies the
+ * payment record at once (audited) and, from a bank account, proposes its entry.
  */
 import type { LineInput } from "@cosimo/core";
 import { type OrgDb, type OrgTx, org, system } from "@cosimo/db";
@@ -119,6 +122,7 @@ import {
   templateView,
 } from "./recurring.ts";
 import { REPORT_KEYS, runReport } from "./reports.ts";
+import { listReserves, proposeReserveTrueUpTx, recordReservePaymentTx, reserveView } from "./reserves.ts";
 import { listReview, mustGetReview, reviewView, withdrawReviewTx } from "./review.ts";
 import { createRuleTx } from "./rules.ts";
 import type { BlobStore } from "./storage.ts";
@@ -2362,13 +2366,14 @@ tool({
   name: "set_forecast_override",
   title: "Exclude or shift something in a scenario",
   description:
-    "In a scenario this connection created, exclude an open invoice, bill, recurring template, or planned item from the forecast, or shift it by a number of days (positive is later). The same target again replaces the earlier override. Applies at once; the books don't change.",
+    "In a scenario this connection created, exclude an open invoice, bill, recurring template, planned item, or reserve installment from the forecast, or shift it by a number of days (positive is later). For a reserve installment, target_id is the part (a reserve flow's target.id) and target_date its due date; without target_date it applies to every installment of the part. The same target again replaces the earlier override. Applies at once; the books don't change.",
   write: true,
   money: false,
   input: z.object({
     scenario_id: z.string(),
-    target_type: z.enum(["invoice", "bill", "recurring_template", "forecast_item"]),
+    target_type: z.enum(["invoice", "bill", "recurring_template", "forecast_item", "reserve_part"]),
     target_id: z.string(),
+    target_date: IsoDate.optional().describe("reserve_part only: the installment's due date."),
     action: z.enum(["exclude", "shift"]),
     shift_days: z.number().int().min(-366).max(366).optional().describe("With action shift: days, not zero."),
   }),
@@ -2379,6 +2384,7 @@ tool({
         scenario_id: i.scenario_id,
         target_type: i.target_type as OverrideTarget,
         target_id: i.target_id,
+        target_date: i.target_date ?? null,
         action: i.action,
         shift_days: i.shift_days ?? null,
       }),
@@ -2396,7 +2402,7 @@ tool({
   name: "propose_owner_draw",
   title: "Propose an owner draw",
   description:
-    "Propose an owner draw: debit Owner Draw, credit the chosen bank account, on the date. It goes through the review policy like any entry (for an assistant, the review queue). The server computes the forecast itself and attaches it to the review item (capacity, low point, drivers), so the reviewer sees what the draw was judged against. A draw over draw_capacity is never refused: the result says exceeds_capacity, so tell the person. Pending, it counts as an outflow in the forecast. Call get_cash_forecast first and give the person the capacity.",
+    "Propose an owner draw: debit Owner Draw, credit the chosen bank account, on the date. It goes through the review policy like any entry (for an assistant, the review queue). The server computes the forecast itself and attaches it to the review item (capacity, low point, drivers), so the reviewer sees what the draw was judged against. A draw over draw_capacity is never refused: the result says exceeds_capacity, so tell the person. Pending, it counts as an outflow in the forecast. Call get_cash_forecast first and give the person the capacity. With include_true_ups, it also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries; all are returned in true_ups). With pay_reserve, the draw is a payment toward that reserve part and tax year instead (from the bank account), as record_reserve_payment would record it.",
   write: true,
   money: true,
   input: z.object({
@@ -2406,6 +2412,17 @@ tool({
     memo: z.string().max(500).optional(),
     scenario_id: ScenarioIdArg.describe("The scenario the draw is judged against. Omit for the baseline."),
     ...ForecastWindowArgs,
+    include_true_ups: z
+      .boolean()
+      .optional()
+      .describe("Also propose true-ups of book-mode reserves that are off their target."),
+    pay_reserve: z
+      .object({
+        part_id: z.string().describe("A reserve part from get_reserves."),
+        tax_year: z.number().int().min(1900).max(9999).describe("The tax year the payment is for."),
+      })
+      .optional()
+      .describe("Make the draw a payment toward this reserve part instead."),
     rationale: Rationale,
   }),
   async run(t, i) {
@@ -2419,15 +2436,112 @@ tool({
         scenario_id: i.scenario_id,
         window: { window: i.window, bucket: i.bucket, periods: i.periods },
         rationale: i.rationale,
+        include_true_ups: i.include_true_ups,
+        pay_reserve: i.pay_reserve ?? null,
       }),
     );
     return {
       ...outcome(out.result),
       forecast_snapshot: out.forecast_snapshot,
       exceeds_capacity: out.exceeds_capacity,
+      ...(out.payment ? { reserve_payment: out.payment } : {}),
+      true_ups: out.true_ups.map((x) => ({
+        reserve_id: x.reserve_id,
+        ...(x.result ? outcome(x.result) : { status: "skipped", message: x.skipped }),
+      })),
       message: out.exceeds_capacity
         ? `Proposed, but the draw is more than the forecast's capacity (${(out.forecast_snapshot.draw_capacity.amount / 100).toFixed(2)}). Tell the person.`
         : outcome(out.result).message,
+    };
+  },
+});
+
+tool({
+  name: "get_reserves",
+  title: "Get reserves",
+  description:
+    "The reserves the person set up (money set aside as a rate of net income each tax year, such as tax on the owner's share of profit) and where each stands as of a date: per part, the target (rate × net income for the tax year to date, never below 0), paid (payments recorded for that tax year), remaining, the projected annual amount, and the next due date with its amount. In book mode also booked (true-ups posted or waiting in review), true_up_due (target − booked), and held (booked − paid). Cosimo doesn't compute tax: the rates and dates are the person's. You can't create a reserve or change its rates or due dates; the person does that in Cosimo.",
+  write: false,
+  money: true,
+  input: z.object({
+    as_of: IsoDate.optional().describe("Default today."),
+    tax_year: z.number().int().min(1900).max(9999).optional().describe("Default: the year as_of falls in."),
+  }),
+  async run(t, i) {
+    const db = t.scope.handle.db;
+    const data = [];
+    for (const r of await listReserves(db))
+      data.push(await reserveView(db, r.id, { as_of: i.as_of ?? null, tax_year: i.tax_year ?? null }));
+    return { data };
+  },
+});
+
+tool({
+  name: "propose_reserve_true_up",
+  title: "Propose a reserve true-up",
+  description:
+    "For a reserve in book mode, propose one entry that books each part at its target as of the date: debit the charge account (Owner Draw unless the person chose another), credit the part's liability account, for target − booked (the other way when the target fell). It waits in the review queue. Refused while a true-up of the same reserve is already pending, and when nothing differs.",
+  write: true,
+  money: true,
+  input: z.object({
+    reserve_id: z.string().describe("A reserve from get_reserves."),
+    as_of: IsoDate.optional().describe("The entry's date and the date net income runs to. Default today."),
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write((tx) =>
+      proposeReserveTrueUpTx(tx, t.scope.id, t.scope.actor, i.reserve_id, {
+        as_of: i.as_of ?? null,
+        rationale: i.rationale,
+      }),
+    );
+    return outcome(r);
+  },
+});
+
+tool({
+  name: "record_reserve_payment",
+  title: "Record a reserve payment",
+  description:
+    "Record a payment toward a reserve part, such as an estimated tax payment, for the tax year it belongs to (a January payment is often for the year before). With from_bank_account_id it proposes an entry: debit the part's liability account (book mode) or the reserve's charge account (track mode), credit the bank account. Without it (paid personally, out of a draw already taken): in track mode only the record is made, applied at once and audited; in book mode it proposes debit the part's liability account, credit the charge account (Owner Draw unless set), because the earlier draw settled the declared distribution. A proposed entry waits in review, and rejecting it removes the payment.",
+  write: true,
+  money: true,
+  input: z.object({
+    part_id: z.string().describe("A reserve part from get_reserves."),
+    tax_year: z.number().int().min(1900).max(9999),
+    date: IsoDate,
+    amount: cents("Positive.", "positive"),
+    from_bank_account_id: z
+      .string()
+      .optional()
+      .describe("The business bank account it was paid from, if any."),
+    note: z.string().max(500).optional(),
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const out = await t.scope.handle.write((tx) =>
+      recordReservePaymentTx(tx, t.scope.id, t.scope.actor, {
+        part_id: i.part_id,
+        tax_year: i.tax_year,
+        date: i.date,
+        amount: i.amount,
+        note: i.note ?? null,
+        from_bank_account_id: i.from_bank_account_id ?? null,
+        rationale: i.rationale,
+      }),
+    );
+    return {
+      payment: out.payment,
+      ...(out.result
+        ? outcome(out.result)
+        : {
+            status: "done",
+            review_item_id: null,
+            entry_id: null,
+            message: "Recorded. No entry: it was paid outside the business accounts.",
+          }),
     };
   },
 });

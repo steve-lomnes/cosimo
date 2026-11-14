@@ -58,8 +58,12 @@ function ForecastSnapshotView({ s }: { s: ForecastSnapshot }) {
       </p>
       <p>
         Safe to draw <strong>{money(cap.amount)}</strong>: low point {money(cap.breakdown.low_point)} on{" "}
-        {fmtDate(s.low_point.date)}, less a {money(cap.breakdown.buffer)} buffer. Opening cash{" "}
-        {money(s.opening_cash)}.
+        {fmtDate(s.low_point.date)}, less a {money(cap.breakdown.buffer)} buffer
+        {/* Snapshots from before reserves have no reserves_not_in_window. */}
+        {cap.breakdown.reserves_not_in_window
+          ? ` and ${money(cap.breakdown.reserves_not_in_window)} of reserves due later`
+          : ""}
+        . Opening cash {money(s.opening_cash)}.
         {s.exceeds_capacity && (
           <>
             {" "}
@@ -257,6 +261,20 @@ function ReviewCard({
       fee: number;
     };
     forecast_snapshot?: ForecastSnapshot;
+    reserve_true_up?: {
+      reserve_name: string;
+      as_of: string;
+      tax_year: number;
+      net_income: number;
+      parts: { label: string; target: number; booked: number | null; amount: number }[];
+    };
+    reserve_payment?: {
+      reserve_name: string;
+      mode: "track" | "book";
+      part_label: string;
+      tax_year: number;
+      amount: number;
+    };
     rule?: { name: string; conditions: Record<string, unknown>; actions: Record<string, unknown> };
     // Invoices and bills held over the threshold before #62 carry only a summary
     // ({ id, number, customer | vendor }); the entry lines above show the amounts.
@@ -361,6 +379,39 @@ function ReviewCard({
               Bank: {fmtDate(payload.bank_transaction.date)} · {payload.bank_transaction.description} ·{" "}
               {money(payload.bank_transaction.amount)}
               {bankName && <span className="text-zinc-500"> ({bankName})</span>}
+            </p>
+          )}
+          {payload.reserve_true_up && (
+            <div className="space-y-1 text-sm">
+              <p className="flex flex-wrap items-center gap-2">
+                <Badge tone="blue">Reserve true-up</Badge>
+                <span>
+                  <strong>{payload.reserve_true_up.reserve_name}</strong> through{" "}
+                  {fmtDate(payload.reserve_true_up.as_of)}, tax year {payload.reserve_true_up.tax_year} (net
+                  income {money(payload.reserve_true_up.net_income)})
+                </span>
+              </p>
+              <ul className="list-disc pl-5 text-xs text-zinc-600 dark:text-zinc-400">
+                {payload.reserve_true_up.parts.map((p) => (
+                  <li key={p.label}>
+                    {p.label}: target {money(p.target)}, booked {money(p.booked ?? 0)}, this books{" "}
+                    {money(p.amount)}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-xs text-zinc-500">
+                Approving books each part at its target in its liability account.
+              </p>
+            </div>
+          )}
+          {payload.reserve_payment && (
+            <p className="flex flex-wrap items-center gap-2 text-sm">
+              <Badge tone="blue">Reserve payment</Badge>
+              <span>
+                {payload.reserve_payment.reserve_name}: {payload.reserve_payment.part_label}, tax year{" "}
+                {payload.reserve_payment.tax_year} · {money(payload.reserve_payment.amount)}
+                <span className="text-zinc-500"> Rejecting it also removes the payment record.</span>
+              </span>
             </p>
           )}
           {payload.forecast_snapshot && <ForecastSnapshotView s={payload.forecast_snapshot} />}

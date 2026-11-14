@@ -53,6 +53,7 @@ import {
   z,
 } from "../openapi.ts";
 import { EntrySchema, submitView } from "./ledger.ts";
+import { ReservePaymentSchema, trueUpView } from "./reserves.ts";
 
 const tags = ["Forecast"];
 
@@ -199,6 +200,11 @@ const FlowSchema = z
       .openapi({ description: "What an override of this flow names" }),
     last_confirmed_at: z.string().nullable().optional(),
     days_overdue: z.number().int().nullable().optional(),
+    tax_year: z
+      .number()
+      .int()
+      .optional()
+      .openapi({ description: "Reserve installments: the tax year it belongs to" }),
   })
   .openapi("ForecastFlow");
 
@@ -246,8 +252,17 @@ const WindowInfo = z.object({
 });
 
 const CapacitySchema = z.object({
-  amount: Cents.openapi({ description: "max(0, low point balance - cash buffer)" }),
-  breakdown: z.object({ low_point: Cents, buffer: Cents }),
+  amount: Cents.openapi({
+    description: "max(0, low point balance - cash buffer - reserves not in the window)",
+  }),
+  breakdown: z.object({
+    low_point: Cents,
+    buffer: Cents,
+    reserves_not_in_window: Cents.openapi({
+      description:
+        "What reserves owe now (target less paid, per part) that no reserve outflow in the window pays",
+    }),
+  }),
   binding: z
     .array(FlowSchema)
     .openapi({ description: "The largest outflows dated on or before the low point" }),
@@ -771,7 +786,7 @@ export function forecastRoutes() {
       tags,
       summary: "Propose an owner draw",
       description:
-        "One entry: debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so.",
+        "One entry: debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so. `pay_reserve` makes it a payment toward a reserve part instead (a `reserve_payment` entry). `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries, each with the snapshot); one already pending is skipped.",
       security: bearerSecurity,
       request: {
         params: OrgParams,
@@ -785,6 +800,11 @@ export function forecastRoutes() {
             window: z.string().optional(),
             rationale: z.string().max(2000).nullable().optional(),
             lock_override_note: z.string().max(1000).nullable().optional(),
+            include_true_ups: z.boolean().optional(),
+            pay_reserve: z
+              .object({ part_id: Id, tax_year: z.number().int().min(1900).max(9999) })
+              .nullable()
+              .optional(),
           }),
         ),
       },
@@ -796,6 +816,16 @@ export function forecastRoutes() {
             review: z.object({ review_item_id: z.string().nullable(), reason: z.string() }).nullable(),
             forecast_snapshot: SnapshotSchema,
             exceeds_capacity: z.boolean(),
+            payment: z.union([ReservePaymentSchema, z.null()]),
+            true_ups: z.array(
+              z.object({
+                reserve_id: z.string(),
+                entry_id: z.string().nullable(),
+                status: z.string().nullable(),
+                review_item_id: z.string().nullable(),
+                skipped: z.string().nullable(),
+              }),
+            ),
           }),
           "Created",
         ),
@@ -813,6 +843,8 @@ export function forecastRoutes() {
           ...submitView(out.result),
           forecast_snapshot: out.forecast_snapshot,
           exceeds_capacity: out.exceeds_capacity,
+          payment: out.payment,
+          true_ups: out.true_ups.map(trueUpView),
         },
         201,
       );

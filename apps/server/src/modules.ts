@@ -102,3 +102,12 @@ registerApiModule(insightsRoutes);
 
 // Cash forecast (#113, SPEC §9.3)
 registerApiModule(forecastRoutes);
+
+// Reserves (#114, SPEC §9.4)
+import { reserveRoutes } from "./http/routes/reserves.ts";
+import { registerReserveJobs } from "./jobs/reserve-jobs.ts";
+
+registerContextPlugin(() => {
+  registerReserveJobs();
+});
+registerApiModule(reserveRoutes);

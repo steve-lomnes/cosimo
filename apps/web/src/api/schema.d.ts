@@ -23584,7 +23584,7 @@ export interface paths {
         put?: never;
         /**
          * Propose an owner draw
-         * @description One entry: debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so.
+         * @description One entry: debit Owner Draw, credit the bank account's ledger account, through the review policy. The review item carries the forecast as the server computed it. A draw over `draw_capacity` is never refused; `exceeds_capacity` says so. `pay_reserve` makes it a payment toward a reserve part instead (a `reserve_payment` entry). `include_true_ups` also proposes a true-up of every book-mode reserve whose booked amount differs from its target (separate entries, each with the snapshot); one already pending is skipped.
          */
         post: {
             parameters: {
@@ -23619,6 +23619,12 @@ export interface paths {
                         window?: string;
                         rationale?: string | null;
                         lock_override_note?: string | null;
+                        include_true_ups?: boolean;
+                        pay_reserve?: {
+                            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                            part_id: string;
+                            tax_year: number;
+                        } | null;
                     };
                 };
             };
@@ -23638,6 +23644,14 @@ export interface paths {
                             } | null;
                             forecast_snapshot: components["schemas"]["ForecastSnapshot"];
                             exceeds_capacity: boolean;
+                            payment: components["schemas"]["ReservePayment"] | null;
+                            true_ups: {
+                                reserve_id: string;
+                                entry_id: string | null;
+                                status: string | null;
+                                review_item_id: string | null;
+                                skipped: string | null;
+                            }[];
                         };
                     };
                 };
@@ -23707,6 +23721,1067 @@ export interface paths {
             };
         };
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reserves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List reserves */
+        get: {
+            parameters: {
+                query?: {
+                    include_archived?: "true" | "false";
+                };
+                header?: never;
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: components["schemas"]["Reserve"][];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Create a reserve
+         * @description Book mode needs a liability account for each part (its own); the charge account defaults to Owner Draw.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReserveInput"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Reserve"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reserves/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a reserve */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Reserve"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Archive a reserve
+         * @description It leaves the forecast; its payments and entries stay.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Reserve"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Change a reserve */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReservePatch"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Reserve"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reserves/{id}/view": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A reserve's target, paid, and remaining for a tax year
+         * @description Net income from the tax year's start to `as_of` (default today), on the org's default basis, times each part's rate. Without `tax_year` it is the year `as_of` falls in.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    as_of?: string;
+                    tax_year?: number;
+                };
+                header?: never;
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReserveView"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reserves/{id}/true-up": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Propose a true-up (book mode)
+         * @description One entry, dated `as_of` (default today), with a pair of lines per part whose booked amount differs from its target: debit the charge account, credit the part's liability account (the other way when the target fell). 409 `true_up_pending` while one is waiting in review.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * Format: date
+                         * @example 2026-01-31
+                         */
+                        as_of?: string;
+                        rationale?: string | null;
+                        lock_override_note?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            entry: components["schemas"]["JournalEntry"];
+                            status: string;
+                            review: {
+                                review_item_id: string | null;
+                                reason: string;
+                            } | null;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reserves/{id}/payments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a reserve's payments */
+        get: {
+            parameters: {
+                query?: {
+                    tax_year?: number;
+                };
+                header?: never;
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: components["schemas"]["ReservePayment"][];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Record a payment toward a reserve part
+         * @description `tax_year` is the year the payment is for (a January payment can be for the year before). Without `from_bank_account_id` (paid personally) it is only the record, applied at once. With one, it also submits an entry through the review policy: debit the part's liability account (book mode) or the charge account (track mode), credit the bank account. Rejecting that entry removes the payment.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        part_id: string;
+                        tax_year: number;
+                        /**
+                         * Format: date
+                         * @example 2026-01-31
+                         */
+                        date: string;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        amount: number;
+                        note?: string | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        from_bank_account_id?: string | null;
+                        rationale?: string | null;
+                        lock_override_note?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            payment: components["schemas"]["ReservePayment"];
+                            entry: {
+                                entry: components["schemas"]["JournalEntry"];
+                                status: string;
+                                review: {
+                                    review_item_id: string | null;
+                                    reason: string;
+                                } | null;
+                            } | null;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reserve-payments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a reserve payment
+         * @description Only a payment with no entry, or whose entry was rejected or reversed. A posted entry is in the books: reverse it first.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Ok"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -25517,7 +26592,7 @@ export interface components {
             };
             draw_capacity: {
                 /**
-                 * @description max(0, low point balance - cash buffer)
+                 * @description max(0, low point balance - cash buffer - reserves not in the window)
                  * @example 12345
                  */
                 amount: number;
@@ -25532,6 +26607,11 @@ export interface components {
                      * @example 12345
                      */
                     buffer: number;
+                    /**
+                     * @description What reserves owe now (target less paid, per part) that no reserve outflow in the window pays
+                     * @example 12345
+                     */
+                    reserves_not_in_window: number;
                 };
                 /** @description The largest outflows dated on or before the low point */
                 binding: components["schemas"]["ForecastFlow"][];
@@ -25574,6 +26654,8 @@ export interface components {
             };
             last_confirmed_at?: string | null;
             days_overdue?: number | null;
+            /** @description Reserve installments: the tax year it belongs to */
+            tax_year?: number;
         };
         ForecastAttention: {
             /** @enum {string} */
@@ -25818,7 +26900,7 @@ export interface components {
             };
             draw_capacity: {
                 /**
-                 * @description max(0, low point balance - cash buffer)
+                 * @description max(0, low point balance - cash buffer - reserves not in the window)
                  * @example 12345
                  */
                 amount: number;
@@ -25833,6 +26915,11 @@ export interface components {
                      * @example 12345
                      */
                     buffer: number;
+                    /**
+                     * @description What reserves owe now (target less paid, per part) that no reserve outflow in the window pays
+                     * @example 12345
+                     */
+                    reserves_not_in_window: number;
                 };
                 /** @description The largest outflows dated on or before the low point */
                 binding: components["schemas"]["ForecastFlow"][];
@@ -25841,6 +26928,235 @@ export interface components {
             drivers: components["schemas"]["ForecastFlow"][];
             attention_count: number;
             exceeds_capacity: boolean;
+        };
+        ReservePayment: {
+            id: string;
+            part_id: string;
+            reserve_id: string;
+            part_label: string;
+            tax_year: number;
+            date: string;
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            amount: number;
+            entry_id: string | null;
+            entry_status: string | null;
+            entry_reversed: boolean;
+            note: string | null;
+            created_by_actor: string;
+            created_at: string;
+            can_delete: boolean;
+        };
+        Reserve: {
+            id: string;
+            name: string;
+            /** @enum {string} */
+            mode: "track" | "book";
+            /** @enum {string} */
+            base: "net_income";
+            tax_year_start_month: number;
+            /** @description Null: the Owner Draw account */
+            charge_account_id: string | null;
+            /** @enum {string} */
+            true_up_schedule: "manual" | "monthly";
+            parts: components["schemas"]["ReservePart"][];
+            created_at: string;
+            updated_at: string;
+            archived_at: string | null;
+        };
+        ReservePart: {
+            id: string;
+            label: string;
+            /** @description Basis points of the base: 2500 is 25% */
+            rate_bp: number;
+            due_dates: components["schemas"]["ReserveDueDate"][];
+            liability_account_id: string | null;
+            position: number;
+        };
+        ReserveDueDate: {
+            month: number;
+            day: number;
+            /** @description 0: inside the tax year; 1: the year after (a January installment) */
+            year_offset: 0 | 1;
+        };
+        ReserveInput: {
+            name: string;
+            /** @enum {string} */
+            mode?: "track" | "book";
+            /** @enum {string} */
+            base?: "net_income";
+            tax_year_start_month?: number;
+            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+            charge_account_id?: string | null;
+            /** @enum {string} */
+            true_up_schedule?: "manual" | "monthly";
+            parts: {
+                /**
+                 * @description An existing part to keep; leave out for a new one
+                 * @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5
+                 */
+                id?: string | null;
+                label: string;
+                rate_bp: number;
+                due_dates: components["schemas"]["ReserveDueDate"][];
+                /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                liability_account_id?: string | null;
+            }[];
+        };
+        /** @description `parts`, when given, is the whole list; parts left out are archived */
+        ReservePatch: {
+            name?: string;
+            /** @enum {string} */
+            mode?: "track" | "book";
+            /** @enum {string} */
+            base?: "net_income";
+            tax_year_start_month?: number;
+            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+            charge_account_id?: string | null;
+            /** @enum {string} */
+            true_up_schedule?: "manual" | "monthly";
+            parts?: {
+                /**
+                 * @description An existing part to keep; leave out for a new one
+                 * @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5
+                 */
+                id?: string | null;
+                label: string;
+                rate_bp: number;
+                due_dates: components["schemas"]["ReserveDueDate"][];
+                /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                liability_account_id?: string | null;
+            }[];
+        };
+        ReserveView: {
+            reserve: components["schemas"]["Reserve"];
+            as_of: string;
+            tax_year: number;
+            tax_year_start: string;
+            tax_year_end: string;
+            /** @enum {string} */
+            basis: "cash" | "accrual";
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            net_income: number;
+            parts: {
+                part_id: string;
+                label: string;
+                rate_bp: number;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                target: number;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                paid: number;
+                /**
+                 * @description target - paid
+                 * @example 12345
+                 */
+                remaining: number;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                projected_annual: number;
+                /**
+                 * @description Book mode: true-ups posted or pending in the tax year
+                 * @example 12345
+                 */
+                booked: number | null;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                booked_pending: number | null;
+                /**
+                 * @description target - booked
+                 * @example 12345
+                 */
+                true_up_due: number | null;
+                /**
+                 * @description booked - paid
+                 * @example 12345
+                 */
+                held: number | null;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                liability_balance: number | null;
+                next_due: {
+                    date: string;
+                    /**
+                     * @description Integer minor units (cents)
+                     * @example 12345
+                     */
+                    amount: number;
+                } | null;
+            }[];
+            totals: {
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                target: number;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                paid: number;
+                /**
+                 * @description target - paid
+                 * @example 12345
+                 */
+                remaining: number;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                projected_annual: number;
+                /**
+                 * @description Book mode: true-ups posted or pending in the tax year
+                 * @example 12345
+                 */
+                booked: number | null;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                booked_pending: number | null;
+                /**
+                 * @description target - booked
+                 * @example 12345
+                 */
+                true_up_due: number | null;
+                /**
+                 * @description booked - paid
+                 * @example 12345
+                 */
+                held: number | null;
+                /**
+                 * @description Integer minor units (cents)
+                 * @example 12345
+                 */
+                liability_balance: number | null;
+                next_due: {
+                    date: string;
+                    /**
+                     * @description Integer minor units (cents)
+                     * @example 12345
+                     */
+                    amount: number;
+                } | null;
+            };
+            true_up_pending: boolean;
         };
     };
     responses: never;

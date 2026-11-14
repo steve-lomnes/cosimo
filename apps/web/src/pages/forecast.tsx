@@ -43,6 +43,7 @@ import { centsToDecimal, fmtDate, money, todayIso, tryParseCents } from "../lib/
 import { useAccounts } from "../lib/ledger";
 import { useOrgId, useRole } from "../lib/org";
 import { ContactPicker } from "./invoices";
+import { ForecastTabs } from "./reserves";
 
 export const validateForecastSearch = (s: Record<string, unknown>) => ({
   scenario: typeof s.scenario === "string" && s.scenario ? s.scenario : undefined,
@@ -105,6 +106,7 @@ export function ForecastPage() {
           )
         }
       />
+      <ForecastTabs value="forecast" />
       <Card className="mb-4">
         <div className="flex flex-wrap items-end gap-3">
           <Field label="Scenario" className="min-w-48">
@@ -269,7 +271,15 @@ function Figures({ f }: { f: Forecast }) {
       <Figure label="Cash buffer" hint="Kept on hand; set under Assumptions">
         <Amount cents={cap.breakdown.buffer} currency={cur} />
       </Figure>
-      <Figure label="Safe to draw" hint="Low point less the buffer" strong>
+      <Figure
+        label="Safe to draw"
+        hint={
+          cap.breakdown.reserves_not_in_window > 0
+            ? `Low point less the buffer and ${money(cap.breakdown.reserves_not_in_window, cur)} of reserves due later`
+            : "Low point less the buffer"
+        }
+        strong
+      >
         <span data-testid="safe-to-draw">
           <Amount cents={cap.amount} currency={cur} />
         </span>
@@ -436,6 +446,12 @@ function SourceChip({ flow, orgId }: { flow: ForecastFlow; orgId: string }) {
   if (flow.source === "pending")
     return (
       <Link to="/o/$orgId/accounting/review" params={{ orgId }}>
+        {chip}
+      </Link>
+    );
+  if (flow.source === "reserve")
+    return (
+      <Link to="/o/$orgId/forecast/reserves" params={{ orgId }}>
         {chip}
       </Link>
     );

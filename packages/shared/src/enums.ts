@@ -62,6 +62,8 @@ export const SOURCE_TYPES = [
   "import",
   "reversal",
   "owner_draw",
+  "reserve_true_up",
+  "reserve_payment",
 ] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 

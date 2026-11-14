@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
 import {
@@ -39,6 +39,7 @@ import {
   useScenarios,
   useWindows,
 } from "../lib/forecast";
+import { balanceSteps, compactMoney, dateTicks, daysBetween, niceTicks } from "../lib/forecast-chart";
 import { flowMatches, parseQuery } from "../lib/forecast-search";
 import { centsToDecimal, fmtDate, money, todayIso, tryParseCents } from "../lib/format";
 import { useAccounts } from "../lib/ledger";
@@ -49,7 +50,6 @@ import { ForecastTabs } from "./reserves";
 export const validateForecastSearch = (s: Record<string, unknown>) => ({
   scenario: typeof s.scenario === "string" && s.scenario ? s.scenario : undefined,
   window: typeof s.window === "string" && s.window ? s.window : undefined,
-  view: s.view === "periods" ? ("periods" as const) : undefined,
 });
 
 type Dialog =
@@ -59,8 +59,7 @@ type Dialog =
   | { kind: "custom" }
   | { kind: "assumptions" }
   | { kind: "item"; item?: PlannedItem }
-  | { kind: "draw" }
-  | { kind: "shift"; flow: ForecastFlow };
+  | { kind: "draw" };
 
 const CUSTOM = "custom";
 
@@ -68,7 +67,7 @@ export function ForecastPage() {
   const orgId = useOrgId();
   const { canWrite } = useRole();
   const navigate = useNavigate();
-  const search = useSearch({ strict: false }) as { scenario?: string; window?: string; view?: "periods" };
+  const search = useSearch({ strict: false }) as { scenario?: string; window?: string };
   const scenarios = useScenarios(orgId);
   const windows = useWindows(orgId);
   const baseline = scenarios.data?.find((s) => s.is_baseline);
@@ -81,11 +80,11 @@ export function ForecastPage() {
   const [dialog, setDialog] = useState<Dialog>(null);
   const close = () => setDialog(null);
 
-  const go = (next: { scenario?: string; window?: string; view?: "periods" }) =>
+  const go = (next: { scenario?: string; window?: string }) =>
     navigate({
       to: "/o/$orgId/forecast",
       params: { orgId },
-      search: { scenario: search.scenario, window: search.window, view: search.view, ...next } as never,
+      search: { scenario: search.scenario, window: search.window, ...next } as never,
     });
 
   const allItems = useMemo(
@@ -203,24 +202,13 @@ export function ForecastPage() {
           <Card title="Projected cash">
             <BalanceChart f={f} />
           </Card>
-          {search.view === "periods" ? (
-            <BucketTable
-              f={f}
-              canWrite={canWrite}
-              scenarioId={scenarioId}
-              onShift={(flow) => setDialog({ kind: "shift", flow })}
-              viewToggle={<ViewToggle view="periods" onChange={(v) => go({ view: v })} />}
-            />
-          ) : (
-            <TransactionList
-              f={f}
-              items={allItems}
-              canWrite={canWrite}
-              scenarioId={scenarioId}
-              onEditItem={(item) => setDialog({ kind: "item", item })}
-              viewToggle={<ViewToggle view="list" onChange={(v) => go({ view: v })} />}
-            />
-          )}
+          <TransactionList
+            f={f}
+            items={allItems}
+            canWrite={canWrite}
+            scenarioId={scenarioId}
+            onEditItem={(item) => setDialog({ kind: "item", item })}
+          />
           <AttentionPanel
             f={f}
             items={allItems}
@@ -264,7 +252,6 @@ export function ForecastPage() {
       {dialog?.kind === "assumptions" && current && <AssumptionsDialog scenario={current} onClose={close} />}
       {dialog?.kind === "item" && <ItemDialog item={dialog.item} scenarioId={scenarioId} onClose={close} />}
       {dialog?.kind === "draw" && f && <DrawDialog f={f} scenarioId={scenarioId} onClose={close} />}
-      {dialog?.kind === "shift" && <ShiftDialog flow={dialog.flow} scenarioId={scenarioId} onClose={close} />}
     </>
   );
 }
@@ -347,87 +334,285 @@ const bucketLabel = (b: { start: string; end: string }, kind: string) =>
       })
     : `${fmtDate(b.start)} – ${fmtDate(b.end)}`;
 
-function BalanceChart({ f }: { f: Forecast }) {
-  const W = 640;
-  const H = 200;
-  const pad = { l: 8, r: 8, t: 14, b: 22 };
-  const n = f.buckets.length;
-  const buffer = f.draw_capacity.breakdown.buffer;
-  const ys = [f.opening_cash, ...f.buckets.map((b) => b.ending), f.low_point.balance];
-  const lo = Math.min(0, buffer, ...ys);
-  const hi = Math.max(buffer, ...ys, lo + 1);
-  const x = (frac: number) => pad.l + frac * (W - pad.l - pad.r);
-  const y = (v: number) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
-  // A step line through the balance at the end of each day that moves cash, so a dip inside a
-  // period (and the low point) sits on the line rather than between period ends.
-  const days = (a: string, c: string) => (Date.parse(c) - Date.parse(a)) / 86_400_000;
-  const dayEndX = (bi: number, date: string) => {
-    const b = f.buckets[bi]!;
-    return x((bi + (days(b.start, date) + 1) / (days(b.start, b.end) + 1)) / n);
-  };
-  const points: (readonly [number, number])[] = [[x(0), y(f.opening_cash)]];
-  let running = f.opening_cash;
-  f.buckets.forEach((b, bi) => {
-    const byDate = new Map<string, number>();
-    for (const fl of b.flows) byDate.set(fl.date, (byDate.get(fl.date) ?? 0) + fl.amount);
-    for (const [date, delta] of [...byDate].sort(([a], [c]) => a.localeCompare(c))) {
-      if (delta === 0) continue;
-      const px = dayEndX(bi, date);
-      points.push([px, y(running)], [px, y(running + delta)]);
-      running += delta;
-    }
+/** Width of the element, tracked so the chart draws at real pixels (text stays legible on phones). */
+function useWidth(fallback: number) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [w, setW] = useState(fallback);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([e]) => {
+      if (e) setW(Math.max(280, Math.round(e.contentRect.width)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, w] as const;
+}
+
+const md = (d: string, withYear = false) =>
+  new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, {
+    month: "short",
+    day: withYear ? undefined : "numeric",
+    year: withYear ? "2-digit" : undefined,
+    timeZone: "UTC",
   });
-  points.push([x(1), y(running)]);
-  // The low point is the opening balance when nothing takes cash below it.
-  const bi = f.buckets.findIndex((b) => f.low_point.date >= b.start && f.low_point.date <= b.end);
-  const atOpening = f.low_point.date === f.as_of && f.low_point.balance === f.opening_cash;
-  const lowX = atOpening || bi < 0 ? x(0) : dayEndX(bi, f.low_point.date);
+
+function BalanceChart({ f }: { f: Forecast }) {
+  const [wrap, W] = useWidth(640);
+  const [active, setActive] = useState<number | null>(null);
+  const cur = f.currency;
   const first = f.buckets[0]!;
-  const last = f.buckets[n - 1]!;
-  const label = `Projected cash balance from ${fmtDate(first.start)} to ${fmtDate(last.end)}: starts at ${money(f.opening_cash, f.currency)}, lowest ${money(f.low_point.balance, f.currency)} on ${fmtDate(f.low_point.date)}, ends at ${money(last.ending, f.currency)}. The table below has the same figures.`;
+  const last = f.buckets[f.buckets.length - 1]!;
+  const start = f.as_of < first.start ? f.as_of : first.start;
+  const steps = useMemo(
+    () =>
+      balanceSteps(
+        f.opening_cash,
+        start,
+        f.buckets.flatMap((b) => b.flows),
+      ),
+    [f, start],
+  );
+  const buffer = f.draw_capacity.breakdown.buffer;
+  const H = W < 480 ? 210 : 250;
+  const balances = steps.map((s) => s.balance);
+  const ticks = niceTicks(Math.min(0, buffer, ...balances), Math.max(buffer, ...balances), W < 480 ? 3 : 4);
+  const lo = ticks[0]!;
+  const hi = ticks[ticks.length - 1]!;
+  const yLabels = ticks.map((t) => compactMoney(t, cur));
+  const pad = { l: Math.max(...yLabels.map((l) => l.length)) * 7 + 12, r: 12, t: 10, b: 26 };
+  const plotW = W - pad.l - pad.r;
+  const total = daysBetween(start, last.end) + 1;
+  // A day's flows land at the end of that day; the opening balance sits at the start of the first.
+  const xStart = (d: string) => pad.l + (daysBetween(start, d) / total) * plotW;
+  const xEnd = (d: string) => pad.l + ((daysBetween(start, d) + 1) / total) * plotW;
+  const y = (v: number) => pad.t + (1 - (v - lo) / (hi - lo || 1)) * (H - pad.t - pad.b);
+  const stepX = (i: number) => (i === 0 ? pad.l : xEnd(steps[i]!.date));
+
+  const points: string[] = [`${pad.l},${y(f.opening_cash)}`];
+  steps.forEach((s, i) => {
+    if (i === 0) return;
+    points.push(`${stepX(i)},${y(steps[i - 1]!.balance)}`, `${stepX(i)},${y(s.balance)}`);
+  });
+  points.push(`${pad.l + plotW},${y(steps[steps.length - 1]!.balance)}`);
+
+  const atOpening = f.low_point.date === f.as_of && f.low_point.balance === f.opening_cash;
+  const lowX = atOpening ? pad.l : xEnd(f.low_point.date);
+  const isMonth = f.window.bucket === "month";
+  // A partial first period can start a day or two before the next: keep labels apart.
+  const xTicks = dateTicks(
+    f.buckets.map((b) => b.start),
+    Math.max(2, Math.floor(plotW / (isMonth ? 56 : 64))),
+  ).filter((d, i, all) => i === all.length - 1 || xStart(all[i + 1]!) - xStart(d) >= 48);
+
+  const nearest = (px: number) => {
+    let best = 0;
+    for (let i = 1; i < steps.length; i++) if (Math.abs(stepX(i) - px) < Math.abs(stepX(best) - px)) best = i;
+    return best;
+  };
+  const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setActive(nearest(e.clientX - r.left));
+  };
+  const onKey = (e: React.KeyboardEvent<SVGSVGElement>) => {
+    const n = steps.length - 1;
+    const i = active ?? 0;
+    const next =
+      e.key === "ArrowRight"
+        ? Math.min(n, i + 1)
+        : e.key === "ArrowLeft"
+          ? Math.max(0, i - 1)
+          : e.key === "Home"
+            ? 0
+            : e.key === "End"
+              ? n
+              : null;
+    if (e.key === "Escape") setActive(null);
+    if (next === null) return;
+    e.preventDefault();
+    setActive(next);
+  };
+
+  const a = active === null ? null : steps[active];
+  const tipW = 220;
+  const tipLeft = a ? Math.min(Math.max(0, stepX(active!) + 12), W - tipW) : 0;
+  const flipLeft = a && stepX(active!) + 12 + tipW > W;
+  const label = `Projected cash balance from ${fmtDate(start)} to ${fmtDate(last.end)}: starts at ${money(f.opening_cash, cur)}, lowest ${money(f.low_point.balance, cur)} on ${fmtDate(f.low_point.date)}, ends at ${money(last.ending, cur)}. Use the arrow keys to step through the days cash moves; the transaction list below has the same figures.`;
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} className="h-auto w-full">
-      {lo < 0 && (
-        <line
-          x1={pad.l}
-          x2={W - pad.r}
-          y1={y(0)}
-          y2={y(0)}
-          className="stroke-zinc-400 dark:stroke-zinc-600"
-          strokeWidth={1}
-        />
-      )}
-      {buffer > 0 && (
-        <line
-          x1={pad.l}
-          x2={W - pad.r}
-          y1={y(buffer)}
-          y2={y(buffer)}
-          className="stroke-amber-600 dark:stroke-amber-400"
-          strokeWidth={1.5}
-          strokeDasharray="5 4"
-        />
-      )}
-      <polyline
-        points={points.map(([px, py]) => `${px},${py}`).join(" ")}
-        fill="none"
-        className="stroke-brand-600 dark:stroke-gold-400"
-        strokeWidth={2.5}
-        strokeLinejoin="round"
-      />
-      <circle cx={lowX} cy={y(f.low_point.balance)} r={5} className="fill-red-600 dark:fill-red-400" />
-      <text x={W - pad.r} y={H - 6} textAnchor="end" className="fill-zinc-500 text-[10px]">
-        {fmtDate(last.end)}
-      </text>
-      <text x={pad.l} y={H - 6} className="fill-zinc-500 text-[10px]">
-        {fmtDate(first.start)}
-      </text>
-      {buffer > 0 && (
-        <text x={pad.l} y={y(buffer) - 4} className="fill-amber-700 text-[10px] dark:fill-amber-400">
-          Buffer {money(buffer, f.currency)}
-        </text>
-      )}
-    </svg>
+    <div>
+      <ul className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+        <li className="flex items-center gap-1.5">
+          <svg width="18" height="8" aria-hidden="true">
+            <line
+              x1="0"
+              x2="18"
+              y1="4"
+              y2="4"
+              strokeWidth="2.5"
+              className="stroke-brand-600 dark:stroke-gold-400"
+            />
+          </svg>
+          Projected balance
+        </li>
+        {buffer > 0 && (
+          <li className="flex items-center gap-1.5">
+            <svg width="18" height="8" aria-hidden="true">
+              <line
+                x1="0"
+                x2="18"
+                y1="4"
+                y2="4"
+                strokeWidth="1.5"
+                strokeDasharray="4 3"
+                className="stroke-amber-600 dark:stroke-amber-400"
+              />
+            </svg>
+            Cash buffer {money(buffer, cur)}
+          </li>
+        )}
+        <li className="flex items-center gap-1.5">
+          <svg width="10" height="10" aria-hidden="true">
+            <circle cx="5" cy="5" r="4" className="fill-red-600 dark:fill-red-400" />
+          </svg>
+          Low point {money(f.low_point.balance, cur)}, {fmtDate(f.low_point.date)}
+        </li>
+      </ul>
+      <div ref={wrap} className="relative">
+        <svg
+          width={W}
+          height={H}
+          role="img"
+          aria-label={label}
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: the chart is keyboard-explorable (arrow keys step through days, with a live readout)
+          tabIndex={0}
+          className="block touch-pan-y rounded outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+          onPointerMove={onMove}
+          onPointerDown={onMove}
+          onPointerLeave={(e) => {
+            if (e.pointerType === "mouse") setActive(null);
+          }}
+          onKeyDown={onKey}
+          onFocus={() => setActive((v) => v ?? 0)}
+          onBlur={() => setActive(null)}
+        >
+          {ticks.map((t, i) => (
+            <g key={t}>
+              <line
+                x1={pad.l}
+                x2={pad.l + plotW}
+                y1={y(t)}
+                y2={y(t)}
+                strokeWidth={1}
+                className={
+                  t === 0 && lo < 0
+                    ? "stroke-zinc-400 dark:stroke-zinc-500"
+                    : "stroke-zinc-200 dark:stroke-zinc-800"
+                }
+              />
+              <text
+                x={pad.l - 6}
+                y={y(t)}
+                dy="0.32em"
+                textAnchor="end"
+                className="fill-zinc-500 text-[11px] tabular-nums"
+              >
+                {yLabels[i]}
+              </text>
+            </g>
+          ))}
+          {xTicks.map((d) => {
+            const px = xStart(d);
+            const anchor = px - pad.l < 20 ? "start" : pad.l + plotW - px < 20 ? "end" : "middle";
+            return (
+              <g key={d}>
+                <line
+                  x1={px}
+                  x2={px}
+                  y1={H - pad.b}
+                  y2={H - pad.b + 4}
+                  className="stroke-zinc-300 dark:stroke-zinc-700"
+                />
+                <text x={px} y={H - 8} textAnchor={anchor} className="fill-zinc-500 text-[11px]">
+                  {isMonth ? md(d, true) : md(d)}
+                </text>
+              </g>
+            );
+          })}
+          {buffer > 0 && (
+            <line
+              x1={pad.l}
+              x2={pad.l + plotW}
+              y1={y(buffer)}
+              y2={y(buffer)}
+              className="stroke-amber-600 dark:stroke-amber-400"
+              strokeWidth={1.5}
+              strokeDasharray="5 4"
+            />
+          )}
+          <polyline
+            points={points.join(" ")}
+            fill="none"
+            className="stroke-brand-600 dark:stroke-gold-400"
+            strokeWidth={2.5}
+            strokeLinejoin="round"
+          />
+          <circle
+            cx={lowX}
+            cy={y(f.low_point.balance)}
+            r={5}
+            strokeWidth={2}
+            className="fill-red-600 stroke-white dark:fill-red-400 dark:stroke-zinc-900"
+          />
+          {a && (
+            <g pointerEvents="none">
+              <line
+                x1={stepX(active!)}
+                x2={stepX(active!)}
+                y1={pad.t}
+                y2={H - pad.b}
+                strokeWidth={1}
+                className="stroke-zinc-400 dark:stroke-zinc-500"
+              />
+              <circle
+                cx={stepX(active!)}
+                cy={y(a.balance)}
+                r={4.5}
+                strokeWidth={2}
+                className="fill-brand-600 stroke-white dark:fill-gold-400 dark:stroke-zinc-900"
+              />
+            </g>
+          )}
+        </svg>
+        {a && (
+          <div
+            role="status"
+            className="pointer-events-none absolute top-1 rounded-md bg-white p-2.5 text-xs shadow-lg ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-700"
+            style={{ width: tipW, left: flipLeft ? Math.max(0, stepX(active!) - 12 - tipW) : tipLeft }}
+          >
+            <p className="text-sm font-semibold tabular-nums">{money(a.balance, cur)}</p>
+            <p className="text-zinc-500">
+              {active === 0 ? `Opening cash, ${fmtDate(a.date)}` : `End of ${fmtDate(a.date)}`}
+              {a.balance < buffer && (
+                <span className="text-red-600 dark:text-red-400"> · below the buffer</span>
+              )}
+            </p>
+            {a.flows.length > 0 && (
+              <ul className="mt-1.5 space-y-0.5 border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                {a.flows.slice(0, 4).map((fl) => (
+                  <li key={fl.id} className="flex justify-between gap-2">
+                    <span className="truncate text-zinc-600 dark:text-zinc-400">{fl.label}</span>
+                    <span className="whitespace-nowrap tabular-nums">{money(fl.amount, cur)}</span>
+                  </li>
+                ))}
+                {a.flows.length > 4 && <li className="text-zinc-500">and {a.flows.length - 4} more</li>}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -443,200 +628,9 @@ const CHIP_TONE: Record<ForecastFlow["source"], "blue" | "amber" | "zinc" | "gre
   reserve: "red",
 };
 
-function SourceChip({ flow, orgId }: { flow: ForecastFlow; orgId: string }) {
-  const chip = <Badge tone={CHIP_TONE[flow.source]}>{SOURCE_CHIP[flow.source]}</Badge>;
-  if (flow.source === "invoice" && flow.ref)
-    return (
-      <Link to="/o/$orgId/sales/invoices/$invoiceId" params={{ orgId, invoiceId: flow.ref }}>
-        {chip}
-      </Link>
-    );
-  if (flow.source === "bill" && flow.ref)
-    return (
-      <Link to="/o/$orgId/expenses/bills/$billId" params={{ orgId, billId: flow.ref }}>
-        {chip}
-      </Link>
-    );
-  if (flow.source === "pending")
-    return (
-      <Link to="/o/$orgId/accounting/review" params={{ orgId }}>
-        {chip}
-      </Link>
-    );
-  if (flow.source === "reserve")
-    return (
-      <Link to="/o/$orgId/forecast/reserves" params={{ orgId }}>
-        {chip}
-      </Link>
-    );
-  return chip;
-}
-
-function BucketTable({
-  f,
-  canWrite,
-  scenarioId,
-  onShift,
-  viewToggle,
-}: {
-  f: Forecast;
-  canWrite: boolean;
-  scenarioId: string | undefined;
-  onShift: (flow: ForecastFlow) => void;
-  viewToggle: React.ReactNode;
-}) {
-  const orgId = useOrgId();
-  const [open, setOpen] = useState<Set<number>>(new Set());
-  const invalidate = useInvalidateForecast(orgId);
-  const exclude = useMutation({
-    mutationFn: (flow: ForecastFlow) =>
-      unwrap(
-        api.POST("/api/v1/orgs/{orgId}/forecast/overrides", {
-          params: { path: { orgId } },
-          body: {
-            scenario_id: scenarioId ?? null,
-            target_type: flow.target!.type as "invoice",
-            target_id: flow.target!.id,
-            target_date: flow.target!.date ?? null,
-            action: "exclude",
-          },
-        }),
-      ),
-    onSuccess: invalidate,
-  });
-  const cur = f.currency;
-  return (
-    <Card title="By period" actions={viewToggle}>
-      <ErrorText error={exclude.error} />
-      <Table>
-        <thead>
-          <tr>
-            <th className={th}>Period</th>
-            <th className={cx(th, "text-right")}>In</th>
-            <th className={cx(th, "text-right")}>Out</th>
-            <th className={cx(th, "text-right")}>Net</th>
-            <th className={cx(th, "text-right")}>Ending balance</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-          {f.buckets.map((b, i) => (
-            <Fragment key={b.start}>
-              <tr>
-                <td className={td}>
-                  <button
-                    type="button"
-                    aria-expanded={open.has(i)}
-                    aria-label={`${bucketLabel(b, f.window.bucket)}, ${b.flows.length} items`}
-                    onClick={() =>
-                      setOpen((s) => {
-                        const next = new Set(s);
-                        if (!next.delete(i)) next.add(i);
-                        return next;
-                      })
-                    }
-                    className="flex items-center gap-1.5 whitespace-nowrap text-left"
-                  >
-                    <span aria-hidden className="w-3 text-zinc-400">
-                      {open.has(i) ? "▾" : "▸"}
-                    </span>
-                    {f.window.bucket === "week" ? (
-                      <>
-                        <span className="sm:hidden">{shortWeekLabel(b)}</span>
-                        <span className="hidden sm:inline">{bucketLabel(b, f.window.bucket)}</span>
-                      </>
-                    ) : (
-                      bucketLabel(b, f.window.bucket)
-                    )}
-                    {b.flows.length > 0 && <span className="text-xs text-zinc-500">({b.flows.length})</span>}
-                  </button>
-                </td>
-                <td className={cx(td, "text-right")}>
-                  <Amount cents={b.inflow} currency={cur} />
-                </td>
-                <td className={cx(td, "text-right")}>
-                  <Amount cents={b.outflow} currency={cur} className="text-zinc-700 dark:text-zinc-300" />
-                </td>
-                <td className={cx(td, "text-right")}>
-                  <Amount cents={b.net} currency={cur} />
-                </td>
-                <td className={cx(td, "text-right font-medium")}>
-                  <Amount cents={b.ending} currency={cur} />
-                </td>
-              </tr>
-              {open.has(i) &&
-                b.flows.map((flow) => (
-                  <tr key={flow.id} className="bg-zinc-50/60 dark:bg-zinc-800/30">
-                    <td className={cx(td, "pl-9")} colSpan={2}>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <SourceChip flow={flow} orgId={orgId} />
-                        <span>{flow.label}</span>
-                        <span className="text-xs text-zinc-500">
-                          {fmtDate(flow.date)} · {FIRMNESS_LABEL[flow.firmness]}
-                        </span>
-                      </div>
-                    </td>
-                    <td className={cx(td, "text-right")} colSpan={2}>
-                      <Amount cents={flow.amount} currency={cur} />
-                    </td>
-                    <td className={cx(td, "text-right")}>
-                      {canWrite && flow.target && (
-                        <span className="inline-flex gap-1">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            aria-label={`Exclude ${flow.label} in this scenario`}
-                            onClick={() => exclude.mutate(flow)}
-                          >
-                            Exclude
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            aria-label={`Shift ${flow.label}`}
-                            onClick={() => onShift(flow)}
-                          >
-                            Shift…
-                          </Button>
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-            </Fragment>
-          ))}
-        </tbody>
-      </Table>
-    </Card>
-  );
-}
-
 // ----------------------------------------------------------------------------- needs attention
 
 // ----------------------------------------------------------------------------- transactions
-
-function ViewToggle({ view, onChange }: { view: "list" | "periods"; onChange: (v?: "periods") => void }) {
-  const opt = (v: "list" | "periods", label: string) => (
-    <button
-      type="button"
-      aria-pressed={view === v}
-      onClick={() => onChange(v === "periods" ? "periods" : undefined)}
-      className={cx(
-        "rounded px-2.5 py-1 text-xs font-medium",
-        view === v
-          ? "bg-white shadow-sm ring-1 ring-zinc-200 dark:bg-zinc-700 dark:ring-zinc-600"
-          : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100",
-      )}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <div className="inline-flex gap-0.5 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
-      {opt("list", "Transactions")}
-      {opt("periods", "By period")}
-    </div>
-  );
-}
 
 const SOURCE_FILTERS: ForecastFlow["source"][] = [
   "invoice",
@@ -647,7 +641,6 @@ const SOURCE_FILTERS: ForecastFlow["source"][] = [
   "draw",
   "reserve",
 ];
-const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000);
 /** A planned flow's id is `item:<id>:<occurrence date>`; the shown date may be clamped to today. */
 const occurrenceOf = (flow: ForecastFlow) =>
   flow.id.startsWith("item:") ? flow.id.split(":")[2]! : flow.date;
@@ -658,20 +651,39 @@ function TransactionList({
   canWrite,
   scenarioId,
   onEditItem,
-  viewToggle,
 }: {
   f: Forecast;
   items: PlannedItem[];
   canWrite: boolean;
   scenarioId: string | undefined;
   onEditItem: (item: PlannedItem) => void;
-  viewToggle: React.ReactNode;
 }) {
   const orgId = useOrgId();
   const [query, setQuery] = useState("");
   const [dir, setDir] = useState<"all" | "in" | "out">("all");
   const [sources, setSources] = useState<Set<ForecastFlow["source"]>>(new Set());
   const [openId, setOpenId] = useState<string | null>(null);
+
+  // The open row closes when you click anywhere outside it (or press Esc), so reading the list
+  // never leaves a stale editor open. Dialogs opened from the editor don't count as outside.
+  useEffect(() => {
+    if (!openId) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (!t?.isConnected || t.closest("[data-open-flow], [role='dialog']")) return;
+      setOpenId(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || (e.target as Element).closest("#forecast-search, [role='dialog']")) return;
+      setOpenId(null);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [openId]);
 
   // "/" jumps to the search box, as in the pickers' keyboard-first pages.
   useEffect(() => {
@@ -720,7 +732,7 @@ function TransactionList({
     );
 
   return (
-    <Card title="Transactions" actions={viewToggle}>
+    <Card title="Transactions">
       <div className="mb-3 space-y-2">
         <Input
           id="forecast-search"
@@ -816,6 +828,7 @@ function TransactionList({
                     return (
                       <Fragment key={flow.id}>
                         <tr
+                          data-open-flow={open || undefined}
                           className={cx(
                             "border-t border-zinc-100 dark:border-zinc-800",
                             open && "bg-brand-50/50 dark:bg-zinc-800/50",
@@ -862,7 +875,7 @@ function TransactionList({
                           </td>
                         </tr>
                         {open && (
-                          <tr className="bg-brand-50/50 dark:bg-zinc-800/50">
+                          <tr data-open-flow className="bg-brand-50/50 dark:bg-zinc-800/50">
                             <td colSpan={4} className="px-3 pb-3">
                               <RowEditor
                                 flow={flow}
@@ -1983,7 +1996,7 @@ function ItemDialog({
           Repeat
         </label>
         {repeat && (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-2 items-end gap-3 sm:grid-cols-4">
             <Field label="Every">
               {(id) => (
                 <Input
@@ -2010,7 +2023,7 @@ function ItemDialog({
                 <Input id={id} type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
               )}
             </Field>
-            <Field label="Or this many times">
+            <Field label="Occurrences">
               {(id) => (
                 <Input
                   id={id}
@@ -2064,78 +2077,6 @@ function ItemDialog({
           {(id) => <Textarea id={id} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />}
         </Field>
       </form>
-    </Modal>
-  );
-}
-
-function ShiftDialog({
-  flow,
-  scenarioId,
-  onClose,
-}: {
-  flow: ForecastFlow;
-  scenarioId: string | undefined;
-  onClose: () => void;
-}) {
-  const orgId = useOrgId();
-  const invalidate = useInvalidateForecast(orgId);
-  const [days, setDays] = useState("7");
-  const n = Number(days);
-  const valid = Number.isInteger(n) && n !== 0 && Math.abs(n) <= 366;
-  const save = useMutation({
-    mutationFn: () =>
-      unwrap(
-        api.POST("/api/v1/orgs/{orgId}/forecast/overrides", {
-          params: { path: { orgId } },
-          body: {
-            scenario_id: scenarioId ?? null,
-            target_type: flow.target!.type as "invoice",
-            target_id: flow.target!.id,
-            target_date: flow.target!.date ?? null,
-            action: "shift",
-            shift_days: n,
-          },
-        }),
-      ),
-    onSuccess: async () => {
-      await invalidate();
-      onClose();
-    },
-  });
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title="Shift"
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button loading={save.isPending} disabled={!valid} onClick={() => save.mutate()}>
-            Shift
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <ErrorText error={save.error} />
-        <p className="text-sm">
-          {flow.label} · {fmtDate(flow.date)}
-        </p>
-        <Field
-          label="Move by this many days"
-          hint="Positive is later, negative is earlier."
-          error={valid ? null : "Enter a whole number, not 0."}
-        >
-          {(id) => (
-            <Input id={id} type="number" value={days} onChange={(e) => setDays(e.target.value)} autoFocus />
-          )}
-        </Field>
-        <p className="text-xs text-zinc-500">
-          Applies only in this scenario (or the baseline, when it is selected).
-        </p>
-      </div>
     </Modal>
   );
 }

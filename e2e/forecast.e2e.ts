@@ -204,7 +204,7 @@ test("a reserve set up in the form shows its due date in the forecast and holds 
   await expect(safe).toHaveText(usd(2850));
 });
 
-test("the transaction list: search anywhere, change a planned item in its row, and switch to By period", async ({
+test("the transaction list: search anywhere, change a planned item in its row, click away, and read the chart", async ({
   page,
 }) => {
   await signIn(page);
@@ -237,10 +237,20 @@ test("the transaction list: search anywhere, change a planned item in its row, a
   await list.getByRole("button", { name: "Save" }).click();
   await expect(list.getByRole("row", { name: /Studio rent -\$2,300\.00/ })).toBeVisible();
 
-  // The period view is still there.
-  await list.getByRole("button", { name: "By period" }).click();
-  await expect(page.getByRole("heading", { name: "By period" })).toBeVisible();
-  await page.getByRole("button", { name: "Transactions" }).click();
+  // An open row closes when you click away from it, and with Esc.
+  await list.getByRole("button", { name: /Workshop fee/ }).click();
+  await expect(list.getByRole("button", { name: /Workshop fee/ })).toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("heading", { name: "Transactions" }).click();
+  await expect(list.getByRole("button", { name: /Workshop fee/ })).toHaveAttribute("aria-expanded", "false");
+  await list.getByRole("button", { name: /Workshop fee/ }).click();
+  await page.keyboard.press("Escape");
+  await expect(list.getByRole("button", { name: /Workshop fee/ })).toHaveAttribute("aria-expanded", "false");
+
+  // The chart reads out the balance and the day's items from the keyboard.
+  const chart = page.getByRole("img", { name: /Projected cash balance/ });
+  await chart.focus();
+  await page.keyboard.press("End");
+  await expect(page.getByRole("status").filter({ hasText: "Workshop fee" })).toBeVisible();
 
   for (const n of ["Studio rent", "Workshop fee"])
     await page.getByRole("button", { name: `Archive ${n}` }).click();

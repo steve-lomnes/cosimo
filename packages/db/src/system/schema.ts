@@ -135,6 +135,8 @@ export const oauthCodes = sqliteTable("oauth_codes", {
   resource: text("resource"),
   expiresAt: text("expires_at").notNull(),
   usedAt: text("used_at"),
+  /** The connection this code produced, revoked if the code is replayed. Null for codes used before #108. */
+  tokenId: text("token_id").references(() => oauthTokens.id),
 });
 
 export const oauthTokens = sqliteTable(

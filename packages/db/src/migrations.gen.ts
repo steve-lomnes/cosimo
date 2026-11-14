@@ -20,6 +20,11 @@ export const systemMigrations: Migration[] = [
     "tag": "0003_job_runs_last_ok_idx",
     "hash": "060f17d370de985dbcad9c088df9a0965669bdd671d01692349db0b337141482",
     "sql": "CREATE INDEX `job_runs_last_ok_idx` ON `job_runs` (`job`,`status`,`org_id`,`started_at`);"
+  },
+  {
+    "tag": "0004_oauth_code_token_id",
+    "hash": "ec604b81926e50fcebb1dbd12ce5078dd964940ff3db04c58eebd0e011c0f0d7",
+    "sql": "ALTER TABLE `oauth_codes` ADD `token_id` text REFERENCES oauth_tokens(id);"
   }
 ];
 export const orgMigrations: Migration[] = [

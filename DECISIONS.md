@@ -467,3 +467,9 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   stored unreadable. **libheif-js is LGPL-3.0** and used unmodified, which is compatible
   with distributing Cosimo under MIT. `jpeg-js` (already pulled in by
   heic-convert) downscales the image `get_receipt` sends an assistant.
+- **A replayed authorization code revokes the connection it produced** (#108): exchanging a code
+  records the new connection in `oauth_codes.token_id`, in the same transaction that marks the code
+  used, and a replay revokes that row. It used to revoke this client's and user's connections created
+  after the code was issued, which compares a JavaScript timestamp with SQLite's, so a connection
+  created in the same millisecond survived. Codes used before the column existed have no link and
+  keep the time match, now inclusive (`>=`). Refresh rotates the same row, so the link holds.

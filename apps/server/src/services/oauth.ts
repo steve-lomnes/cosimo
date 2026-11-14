@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { newId, type SystemDb, type SystemTx, system } from "@cosimo/db";
 import { minRole, type Role, roleAtLeast } from "@cosimo/shared";
-import { and, asc, desc, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull } from "drizzle-orm";
 import type { AppContext } from "../context.ts";
 import { hashToken, randomToken, safeEqual, TOKEN_PREFIX } from "../crypto.ts";
 import type { Principal } from "../http/types.ts";
@@ -372,7 +372,10 @@ export class OAuthService {
     return client;
   }
 
-  /** Fresh tokens for an existing connection (`{ id }`), or a new connection covering `conn.orgs`. */
+  /**
+   * Fresh tokens for an existing connection (`{ id }`), or a new connection covering `conn.orgs`.
+   * Returns the connection's id beside the response body sent to the client.
+   */
   private async issue(
     tx: SystemTx,
     scope: string,
@@ -386,21 +389,24 @@ export class OAuthService {
       accessExpiresAt: iso(ACCESS_TTL_S * 1000),
       refreshExpiresAt: iso(REFRESH_TTL_S * 1000),
     };
+    let tokenId: string;
     if ("id" in conn) {
+      tokenId = conn.id;
       await tx.update(system.oauthTokens).set(values).where(eq(system.oauthTokens.id, conn.id));
     } else {
       const { orgs, ...rest } = conn;
-      const id = newId();
-      await tx.insert(system.oauthTokens).values({ id, ...rest, scope, ...values });
-      await tx.insert(system.oauthTokenOrgs).values(orgs.map((o) => ({ tokenId: id, ...o })));
+      tokenId = newId();
+      await tx.insert(system.oauthTokens).values({ id: tokenId, ...rest, scope, ...values });
+      await tx.insert(system.oauthTokenOrgs).values(orgs.map((o) => ({ tokenId, ...o })));
     }
-    return {
+    const body = {
       access_token: access,
       token_type: "Bearer",
       expires_in: ACCESS_TTL_S,
       refresh_token: refresh,
       scope,
     };
+    return { tokenId, body };
   }
 
   async exchangeCode(p: {
@@ -427,29 +433,33 @@ export class OAuthService {
         .where(eq(system.oauthCodeOrgs.codeHash, h))
         .all();
       if (row.usedAt) {
-        // A replayed code: revoke whatever it produced (RFC 6749 §4.1.2): connections for this
-        // client and user, issued since the code was, that cover any of the code's orgs.
-        const produced = codeOrgs.length
-          ? await tx
-              .selectDistinct({ id: system.oauthTokens.id })
-              .from(system.oauthTokens)
-              .innerJoin(system.oauthTokenOrgs, eq(system.oauthTokenOrgs.tokenId, system.oauthTokens.id))
-              .where(
-                and(
-                  eq(system.oauthTokens.clientId, row.clientId),
-                  eq(system.oauthTokens.userId, row.userId),
-                  inArray(
-                    system.oauthTokenOrgs.orgId,
-                    codeOrgs.map((o) => o.orgId),
+        // A replayed code: revoke whatever it produced (RFC 6749 §4.1.2). The code records its
+        // connection (#108). A code used before that has none, so fall back to connections for this
+        // client and user, issued since the code was (or in the same millisecond), that cover any
+        // of the code's orgs.
+        const produced = row.tokenId
+          ? [{ id: row.tokenId }]
+          : codeOrgs.length
+            ? await tx
+                .selectDistinct({ id: system.oauthTokens.id })
+                .from(system.oauthTokens)
+                .innerJoin(system.oauthTokenOrgs, eq(system.oauthTokenOrgs.tokenId, system.oauthTokens.id))
+                .where(
+                  and(
+                    eq(system.oauthTokens.clientId, row.clientId),
+                    eq(system.oauthTokens.userId, row.userId),
+                    inArray(
+                      system.oauthTokenOrgs.orgId,
+                      codeOrgs.map((o) => o.orgId),
+                    ),
+                    gte(
+                      system.oauthTokens.createdAt,
+                      new Date(Date.parse(row.expiresAt) - CODE_TTL_S * 1000).toISOString(),
+                    ),
                   ),
-                  gt(
-                    system.oauthTokens.createdAt,
-                    new Date(Date.parse(row.expiresAt) - CODE_TTL_S * 1000).toISOString(),
-                  ),
-                ),
-              )
-              .all()
-          : [];
+                )
+                .all()
+            : [];
         if (produced.length)
           await tx
             .update(system.oauthTokens)
@@ -469,10 +479,6 @@ export class OAuthService {
         throw new OAuthError("invalid_grant", "redirect_uri does not match.");
       if (!safeEqual(pkceChallenge(p.code_verifier!), row.codeChallenge))
         throw new OAuthError("invalid_grant", "PKCE verification failed.");
-      await tx
-        .update(system.oauthCodes)
-        .set({ usedAt: new Date().toISOString() })
-        .where(eq(system.oauthCodes.codeHash, h));
       // An org the user left since consenting is dropped; the rest still connect.
       const orgs: OrgRole[] = [];
       for (const o of codeOrgs) {
@@ -484,12 +490,18 @@ export class OAuthService {
           "invalid_grant",
           "The user is no longer a member of any of those organizations.",
         );
-      return this.issue(tx, row.scope, {
+      const { tokenId, body } = await this.issue(tx, row.scope, {
         clientId: row.clientId,
         userId: row.userId,
         defaultOrgId: orgs.some((o) => o.orgId === row.defaultOrgId) ? row.defaultOrgId : null,
         orgs,
       });
+      // Mark the code used, linked to the connection it produced, in the same transaction.
+      await tx
+        .update(system.oauthCodes)
+        .set({ usedAt: new Date().toISOString(), tokenId })
+        .where(eq(system.oauthCodes.codeHash, h));
+      return body;
     });
     if (!out) throw new OAuthError("invalid_grant", "The authorization code was already used.");
     return out;
@@ -518,7 +530,7 @@ export class OAuthService {
       }
       // Commit the drops (the connection is revoked once none is left), then report the error.
       if (!left) return null;
-      return this.issue(tx, row.scope, { id: row.id });
+      return (await this.issue(tx, row.scope, { id: row.id })).body;
     });
     if (!out)
       throw new OAuthError(

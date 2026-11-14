@@ -1,0 +1,1 @@
+ALTER TABLE `oauth_codes` ADD `token_id` text REFERENCES oauth_tokens(id);

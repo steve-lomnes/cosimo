@@ -8,7 +8,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { newId, org } from "@cosimo/db";
+import { hashToken } from "../src/crypto.ts";
 import { MONEY_NOTE } from "../src/services/mcp-tools.ts";
+import { CODE_TTL_S } from "../src/services/oauth.ts";
 import {
   addMember,
   anon,
@@ -105,6 +107,9 @@ async function authorizeOrgs(
       code_verifier: verifier,
     }),
   );
+  // A failed first exchange would make a later "replay" the first redemption, so fail here.
+  expect(tok.status, JSON.stringify(tok.body)).toBe(200);
+  expect(tok.body.access_token).toBeString();
   return { tok, code, verifier };
 }
 
@@ -2469,10 +2474,8 @@ describe("one connection, several organizations", () => {
     expect((await myConnection(clientId)).orgs.map((o: any) => o.org_id)).toEqual([own]);
   });
 
-  test("a replayed multi-org code revokes the connection it produced", async () => {
-    const clientId = await register("Replay AI");
-    const { tok, code, verifier } = await twoOrgs(clientId);
-    const replay = await raw(
+  const replayCode = (clientId: string, code: string, verifier: string) =>
+    raw(
       "POST",
       "/oauth/token",
       new URLSearchParams({
@@ -2483,6 +2486,61 @@ describe("one connection, several organizations", () => {
         code_verifier: verifier,
       }),
     );
+
+  test("a replayed multi-org code revokes the connection it produced", async () => {
+    const clientId = await register("Replay AI");
+    const { tok, code, verifier } = await twoOrgs(clientId);
+    const replay = await replayCode(clientId, code, verifier);
+    expect(replay.status).toBe(400);
+    expect(replay.body.error).toBe("invalid_grant");
+    expect((await mcp(tok.body.access_token, "ping")).status).toBe(401);
+  });
+
+  /**
+   * A token created in the same millisecond the code was issued (#108): set the connection's
+   * created_at to the code's issue time, so revocation can't depend on the two clocks differing.
+   */
+  const sameMillisecond = async (clientId: string, code: string) => {
+    const { system } = await import("@cosimo/db");
+    const { eq } = await import("drizzle-orm");
+    const row = await env.ctx.system.db
+      .select()
+      .from(system.oauthCodes)
+      .where(eq(system.oauthCodes.codeHash, hashToken(code)))
+      .get();
+    const issuedAt = new Date(Date.parse(row!.expiresAt) - CODE_TTL_S * 1000).toISOString();
+    await env.ctx.system.write((tx) =>
+      tx
+        .update(system.oauthTokens)
+        .set({ createdAt: issuedAt })
+        .where(eq(system.oauthTokens.clientId, clientId)),
+    );
+    return { row: row!, system, eq };
+  };
+
+  test("a replay revokes the connection the code produced, even one created as the code was issued", async () => {
+    const clientId = await register("Same-ms AI");
+    const { tok, code, verifier } = await twoOrgs(clientId);
+    const { row } = await sameMillisecond(clientId, code);
+    expect(row.tokenId).toBe((await myConnection(clientId)).id);
+    const replay = await replayCode(clientId, code, verifier);
+    expect(replay.status).toBe(400);
+    expect(replay.body.error).toBe("invalid_grant");
+    expect((await mcp(tok.body.access_token, "ping")).status).toBe(401);
+  });
+
+  test("a code used before codes recorded their connection still revokes by issue time", async () => {
+    const clientId = await register("Legacy AI");
+    const { tok, code, verifier } = await twoOrgs(clientId);
+    const { system, eq } = await sameMillisecond(clientId, code);
+    await env.ctx.system.write((tx) =>
+      tx
+        .update(system.oauthCodes)
+        .set({ tokenId: null })
+        .where(eq(system.oauthCodes.codeHash, hashToken(code))),
+    );
+    const replay = await replayCode(clientId, code, verifier);
+    expect(replay.status).toBe(400);
     expect(replay.body.error).toBe("invalid_grant");
     expect((await mcp(tok.body.access_token, "ping")).status).toBe(401);
   });

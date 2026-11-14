@@ -55,7 +55,13 @@ export function navFor(orgId: string): NavGroup[] {
         { to: `${o}/accounting/entries`, label: "Journal entries" },
       ],
     },
-    { label: "", items: [{ to: `${o}/reports`, label: "Reports" }] },
+    {
+      label: "",
+      items: [
+        { to: `${o}/reports`, label: "Reports" },
+        { to: `${o}/forecast`, label: "Cash forecast" },
+      ],
+    },
     { label: "", items: [{ to: `${o}/settings`, label: "Settings" }] },
   ];
 }

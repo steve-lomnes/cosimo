@@ -584,6 +584,14 @@ describe("MCP", () => {
       "book_receipt",
       "list_attachments",
       "link_attachment",
+      "get_cash_forecast",
+      "list_forecast_scenarios",
+      "list_planned_items",
+      "create_forecast_scenario",
+      "save_planned_item",
+      "archive_planned_item",
+      "set_forecast_override",
+      "propose_owner_draw",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])

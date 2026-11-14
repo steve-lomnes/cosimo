@@ -187,6 +187,22 @@ record, find it with `list_attachments` and link it with `link_attachment`.
   Nothing runs or changes until a person approves it. For a one-off entry use
   `create_manual_entry`.
 
+## How much can I draw?
+
+1. Call `get_cash_forecast` (the baseline unless the person names a scenario).
+2. Answer with the amount: `draw_capacity.amount`, in dollars, and when the low point is
+   (`low_point.date`).
+3. Say what it depends on: the `binding` outflows that set the low point and the biggest `drivers`,
+   and how firm each is (booked and scheduled are in the books; pending waits in review; planned and
+   draw are plans someone typed in). Name the assumptions that matter, such as the collection lag
+   and the cash buffer.
+4. List the `attention` items, so the person can correct stale information: a planned item past
+   due, an overdue invoice counted as coming in, a bank feed that hasn't synced, a card balance.
+5. Offer `propose_owner_draw` for the amount they choose. A draw over capacity is still proposed, so
+   say so plainly when `exceeds_capacity` is true.
+6. Never edit the baseline. For "what if", `create_forecast_scenario` and put your changes there
+   (`save_planned_item`, `set_forecast_override`); the person promotes it to make it the plan.
+
 ## Contacts
 
 - Before `create_bill_draft` or `create_invoice_draft` for someone new, check `list_contacts` with

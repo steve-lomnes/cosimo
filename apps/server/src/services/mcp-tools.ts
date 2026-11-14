@@ -20,6 +20,11 @@ linking an existing file to a record applies directly and is audited.
  * Recurring templates are proposed too, and nothing runs until a person approves. An assistant may
  * withdraw its own pending proposals, which ends them as rejected. There is no tool to approve,
  * reject, void, delete, or move lock dates.
+ * The cash forecast (get_cash_forecast) is read-only. Its scenarios, planned items, and overrides
+ * aren't ledger records, so they apply at once and are audited, but an assistant writes only to
+ * scenarios its own connection created: the baseline is refused, and so is another connection's
+ * scenario. Promoting a scenario to the baseline is for people. propose_owner_draw is a proposal
+ * like any entry, with the forecast attached.
  */
 import type { LineInput } from "@cosimo/core";
 import { type OrgDb, type OrgTx, org, system } from "@cosimo/db";
@@ -56,6 +61,20 @@ import {
   recordPaymentTx,
 } from "./documents.ts";
 import { assertNoPendingReplacement, proposeReplacementTx } from "./entry-replacement-review.ts";
+import {
+  archiveItemTx,
+  createItemTx,
+  createScenarioTx,
+  forecast,
+  itemView,
+  listItems,
+  listScenarios,
+  type OverrideTarget,
+  proposeOwnerDrawTx,
+  scenarioView,
+  setOverrideTx,
+  updateItemTx,
+} from "./forecast.ts";
 import { assistantImage, normalizeUpload } from "./images.ts";
 import { holdInvoiceDraftTx } from "./invoice-review.ts";
 import { getEntry, listEntries, reverseEntryTx, submitEntryTx } from "./ledger.ts";
@@ -2142,6 +2161,274 @@ tool({
     requireWriter(t);
     const n = await t.scope.handle.write((tx) => appendNoteTx(tx, t.scope.id, t.scope.actor, i.note));
     return { note_id: n.id, created_at: n.created_at, message: "Noted." };
+  },
+});
+
+const ForecastWindowArgs = {
+  window: z
+    .string()
+    .optional()
+    .describe("w13 (13 weeks, the default), m12 (12 months), or the ID of a saved window."),
+  bucket: z.enum(["week", "month"]).optional().describe("With periods, a custom window starting today."),
+  periods: z.number().int().min(1).max(104).optional(),
+};
+const ScenarioIdArg = z
+  .string()
+  .optional()
+  .describe("A scenario from list_forecast_scenarios. Omit it for the baseline.");
+const AssumptionsArg = z
+  .object({
+    collection_lag_days: z
+      .number()
+      .int()
+      .min(0)
+      .max(365)
+      .optional()
+      .describe("Days customers pay after the due date."),
+    late_share_pct: z
+      .number()
+      .int()
+      .min(0)
+      .max(100)
+      .optional()
+      .describe("Percent of each invoice that pays late_days later still."),
+    late_days: z.number().int().min(0).max(365).optional(),
+    min_cash_buffer: cents("Cash to keep on hand.", "nonnegative").optional(),
+  })
+  .describe("Assumptions this scenario changes; the rest use the baseline's.");
+
+tool({
+  name: "get_cash_forecast",
+  title: "Get the cash forecast",
+  description:
+    "The cash forecast from today: opening cash (the cash accounts, not cards), buckets of expected inflows and outflows with their flows, the low point (the lowest balance and its date), and draw_capacity, which is how much the owner can draw now without cash dropping below the cash buffer. To recommend a draw, give draw_capacity.amount, then list draw_capacity.binding (the outflows that set the low point) and the drivers with how firm each is (booked, scheduled, pending, planned, draw), and surface every attention item so the person can correct stale information (a planned item past due, an overdue invoice, a stale bank feed). Open invoices count as coming in on their due date plus the scenario's collection lag. Without scenario_id it is the baseline.",
+  write: false,
+  money: true,
+  input: z.object({ scenario_id: ScenarioIdArg, ...ForecastWindowArgs }),
+  async run(t, i) {
+    return forecast(t.scope.handle.db, i);
+  },
+});
+
+tool({
+  name: "list_forecast_scenarios",
+  title: "List forecast scenarios",
+  description:
+    "The baseline and the named scenarios (what-ifs on top of it), with their assumption overrides and who created them. You can change only scenarios your own connection created (created_by_client); the baseline is changed by a person.",
+  write: false,
+  money: true,
+  input: z.object({}),
+  async run(t) {
+    return { data: await listScenarios(t.scope.handle.db) };
+  },
+});
+
+tool({
+  name: "list_planned_items",
+  title: "List planned items",
+  description:
+    "The planned items (expected receipts and spending not yet in the books, and planned owner draws) of one scenario: its own items only, not the baseline's. Each has last_confirmed_at, which says when someone last said it still holds.",
+  write: false,
+  money: true,
+  input: z.object({ scenario_id: ScenarioIdArg }),
+  async run(t, i) {
+    return { data: await listItems(t.scope.handle.db, i.scenario_id) };
+  },
+});
+
+tool({
+  name: "create_forecast_scenario",
+  title: "Create a forecast scenario",
+  description:
+    "Create a named what-if on top of the baseline forecast, for example 'Lose the Acme retainer', optionally with assumption changes. It applies at once (it isn't a ledger record) and is owned by this connection: only it can add planned items and overrides to it. To make it the baseline, ask the person to promote it.",
+  write: true,
+  money: true,
+  input: z.object({
+    name: z.string().min(1).max(200),
+    description: z.string().max(2000).optional(),
+    assumptions: AssumptionsArg.optional(),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const row = await t.scope.handle.write((tx) =>
+      createScenarioTx(tx, t.scope.id, t.scope.actor, {
+        name: i.name,
+        description: i.description ?? null,
+        assumptions: i.assumptions,
+      }),
+    );
+    return { scenario: scenarioView(row) };
+  },
+});
+
+tool({
+  name: "save_planned_item",
+  title: "Add or change a planned item",
+  description:
+    "Add (or, with id, change) a planned item in a scenario this connection created: an expected receipt or spending that isn't in the books yet. A one-off has a date; a repeating item gives unit (day, week, month, year), interval, and optionally end_date or max_occurrences. kind 'draw' is a planned owner draw. Applies at once and is audited; it never touches the ledger. The baseline and other connections' scenarios are refused.",
+  write: true,
+  money: true,
+  input: z.object({
+    id: z.string().optional().describe("An existing planned item to change; omit to add one."),
+    scenario_id: z.string().optional().describe("Required to add one: a scenario you created."),
+    kind: z.enum(["planned", "draw"]).optional(),
+    name: z.string().min(1).max(200).optional(),
+    direction: z.enum(["in", "out"]).optional(),
+    amount: cents("Positive.", "positive").optional(),
+    date: IsoDate.optional().describe("A one-off's date, or the first date of a repeating item."),
+    unit: z.enum(["day", "week", "month", "year"]).nullable().optional(),
+    interval: z.number().int().min(1).max(1000).optional(),
+    anchor_day: z
+      .number()
+      .int()
+      .min(-1)
+      .max(31)
+      .nullable()
+      .optional()
+      .describe("Monthly or yearly: the day (-1 for the last day)."),
+    end_date: IsoDate.nullable().optional(),
+    max_occurrences: z.number().int().min(1).max(10_000).nullable().optional(),
+    account_id: z.string().nullable().optional(),
+    contact_id: z.string().nullable().optional(),
+    bank_account_id: z.string().nullable().optional(),
+    notes: z.string().max(2000).nullable().optional(),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const row = await t.scope.handle.write(async (tx) => {
+      if (i.id) {
+        return updateItemTx(tx, t.scope.id, t.scope.actor, i.id, {
+          kind: i.kind,
+          name: i.name,
+          direction: i.direction,
+          amount: i.amount,
+          start_date: i.date,
+          unit: i.unit,
+          interval: i.interval,
+          anchor_day: i.anchor_day,
+          end_date: i.end_date,
+          max_occurrences: i.max_occurrences,
+          account_id: i.account_id,
+          contact_id: i.contact_id,
+          bank_account_id: i.bank_account_id,
+          notes: i.notes,
+        });
+      }
+      if (!i.scenario_id)
+        throw unprocessable(
+          "Give scenario_id: a scenario you created with create_forecast_scenario. An assistant can't add to the baseline.",
+          "scenario_required",
+        );
+      if (!i.name || !i.direction || !i.amount || !i.date)
+        throw unprocessable("A new planned item needs name, direction, amount, and date.", "missing_fields");
+      return createItemTx(tx, t.scope.id, t.scope.actor, {
+        scenario_id: i.scenario_id,
+        kind: i.kind,
+        name: i.name,
+        direction: i.direction,
+        amount: i.amount,
+        start_date: i.date,
+        unit: i.unit,
+        interval: i.interval,
+        anchor_day: i.anchor_day,
+        end_date: i.end_date,
+        max_occurrences: i.max_occurrences,
+        account_id: i.account_id,
+        contact_id: i.contact_id,
+        bank_account_id: i.bank_account_id,
+        notes: i.notes,
+      });
+    });
+    return { item: itemView(row) };
+  },
+});
+
+tool({
+  name: "archive_planned_item",
+  title: "Archive a planned item",
+  description:
+    "Take a planned item out of the forecast (it is archived, not deleted). Only in a scenario this connection created.",
+  write: true,
+  money: true,
+  input: z.object({ id: z.string() }),
+  async run(t, i) {
+    requireWriter(t);
+    const row = await t.scope.handle.write((tx) => archiveItemTx(tx, t.scope.id, t.scope.actor, i.id));
+    return { item: itemView(row) };
+  },
+});
+
+tool({
+  name: "set_forecast_override",
+  title: "Exclude or shift something in a scenario",
+  description:
+    "In a scenario this connection created, exclude an open invoice, bill, recurring template, or planned item from the forecast, or shift it by a number of days (positive is later). The same target again replaces the earlier override. Applies at once; the books don't change.",
+  write: true,
+  money: false,
+  input: z.object({
+    scenario_id: z.string(),
+    target_type: z.enum(["invoice", "bill", "recurring_template", "forecast_item"]),
+    target_id: z.string(),
+    action: z.enum(["exclude", "shift"]),
+    shift_days: z.number().int().min(-366).max(366).optional().describe("With action shift: days, not zero."),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const row = await t.scope.handle.write((tx) =>
+      setOverrideTx(tx, t.scope.id, t.scope.actor, {
+        scenario_id: i.scenario_id,
+        target_type: i.target_type as OverrideTarget,
+        target_id: i.target_id,
+        action: i.action,
+        shift_days: i.shift_days ?? null,
+      }),
+    );
+    return {
+      override_id: row.id,
+      scenario_id: row.scenarioId,
+      action: row.action,
+      shift_days: row.shiftDays,
+    };
+  },
+});
+
+tool({
+  name: "propose_owner_draw",
+  title: "Propose an owner draw",
+  description:
+    "Propose an owner draw: debit Owner Draw, credit the chosen bank account, on the date. It goes through the review policy like any entry (for an assistant, the review queue). The server computes the forecast itself and attaches it to the review item (capacity, low point, drivers), so the reviewer sees what the draw was judged against. A draw over draw_capacity is never refused: the result says exceeds_capacity, so tell the person. Pending, it counts as an outflow in the forecast. Call get_cash_forecast first and give the person the capacity.",
+  write: true,
+  money: true,
+  input: z.object({
+    date: IsoDate,
+    amount: cents("Positive.", "positive"),
+    bank_account_id: z.string().describe("A bank account ID from get_cash_snapshot."),
+    memo: z.string().max(500).optional(),
+    scenario_id: ScenarioIdArg.describe("The scenario the draw is judged against. Omit for the baseline."),
+    ...ForecastWindowArgs,
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const out = await t.scope.handle.write((tx) =>
+      proposeOwnerDrawTx(tx, t.scope.id, t.scope.actor, {
+        date: i.date,
+        amount: i.amount,
+        bank_account_id: i.bank_account_id,
+        memo: i.memo ?? null,
+        scenario_id: i.scenario_id,
+        window: { window: i.window, bucket: i.bucket, periods: i.periods },
+        rationale: i.rationale,
+      }),
+    );
+    return {
+      ...outcome(out.result),
+      forecast_snapshot: out.forecast_snapshot,
+      exceeds_capacity: out.exceeds_capacity,
+      message: out.exceeds_capacity
+        ? `Proposed, but the draw is more than the forecast's capacity (${(out.forecast_snapshot.draw_capacity.amount / 100).toFixed(2)}). Tell the person.`
+        : outcome(out.result).message,
+    };
   },
 });
 

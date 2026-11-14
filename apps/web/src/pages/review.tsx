@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { api, unwrap } from "../api/client";
+import type { components } from "../api/schema";
 import {
   Alert,
   Badge,
@@ -44,6 +45,45 @@ const ADJUSTMENT_LABEL = {
   dispute_withdrawal: "Stripe dispute: funds taken back",
   dispute_reinstatement: "Stripe dispute: funds returned",
 } as const;
+
+type ForecastSnapshot = components["schemas"]["ForecastSnapshot"];
+
+/** What the forecast said when an owner draw was proposed: how much was safe to draw, and why. */
+function ForecastSnapshotView({ s }: { s: ForecastSnapshot }) {
+  const cap = s.draw_capacity;
+  return (
+    <div className="space-y-1 rounded-md bg-zinc-50 p-3 text-sm ring-1 ring-zinc-200 dark:bg-zinc-800/40 dark:ring-zinc-800">
+      <p className="font-medium">
+        Cash forecast when proposed ({s.scenario.name}, {s.window.name}, as of {fmtDate(s.computed_at)})
+      </p>
+      <p>
+        Safe to draw <strong>{money(cap.amount)}</strong>: low point {money(cap.breakdown.low_point)} on{" "}
+        {fmtDate(s.low_point.date)}, less a {money(cap.breakdown.buffer)} buffer. Opening cash{" "}
+        {money(s.opening_cash)}.
+        {s.exceeds_capacity && (
+          <>
+            {" "}
+            <Badge tone="red">More than is safe to draw</Badge>
+          </>
+        )}
+      </p>
+      {s.drivers.length > 0 && (
+        <ul className="list-disc pl-5 text-xs text-zinc-600 dark:text-zinc-400">
+          {s.drivers.map((d) => (
+            <li key={d.id}>
+              {d.label} · {fmtDate(d.date)} · {money(d.amount)} ({d.firmness})
+            </li>
+          ))}
+        </ul>
+      )}
+      {s.attention_count > 0 && (
+        <p className="text-xs text-zinc-500">
+          {s.attention_count} item{s.attention_count === 1 ? "" : "s"} needed attention in the forecast.
+        </p>
+      )}
+    </div>
+  );
+}
 
 export function ReviewQueuePage() {
   const orgId = useOrgId();
@@ -216,6 +256,7 @@ function ReviewCard({
       amount: number;
       fee: number;
     };
+    forecast_snapshot?: ForecastSnapshot;
     rule?: { name: string; conditions: Record<string, unknown>; actions: Record<string, unknown> };
     // Invoices and bills held over the threshold before #62 carry only a summary
     // ({ id, number, customer | vendor }); the entry lines above show the amounts.
@@ -322,6 +363,7 @@ function ReviewCard({
               {bankName && <span className="text-zinc-500"> ({bankName})</span>}
             </p>
           )}
+          {payload.forecast_snapshot && <ForecastSnapshotView s={payload.forecast_snapshot} />}
           {payload.provider_adjustment && (
             <p className="text-sm">
               {ADJUSTMENT_LABEL[payload.provider_adjustment.kind]}:{" "}

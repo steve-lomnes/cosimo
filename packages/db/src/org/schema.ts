@@ -698,6 +698,155 @@ export const receipts = sqliteTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// Cash forecast (#113)
+// ---------------------------------------------------------------------------
+
+/**
+ * A forecast scenario. Each org has exactly one baseline (`is_baseline`, created on the first
+ * write); a named scenario holds only its changes on top of it: its own planned items, overrides of
+ * booked or baseline items, and assumption overrides (`assumptions_json`, absent keys mean "use the
+ * baseline's"). Not ledger records: changes apply at once and are audited.
+ */
+export const forecastScenarios = sqliteTable(
+  "forecast_scenarios",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    isBaseline: integer("is_baseline", { mode: "boolean" }).notNull().default(false),
+    description: text("description"),
+    assumptionsJson: text("assumptions_json").notNull().default("{}"),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    /** The OAuth client or API token that created it; only that client may write to it (agents). */
+    createdByClient: text("created_by_client"),
+    archivedAt: text("archived_at"),
+    createdAt: text("created_at").notNull().default(now),
+    updatedAt: text("updated_at").notNull().default(now),
+  },
+  (t) => [uniqueIndex("forecast_scenarios_baseline_uq").on(t.isBaseline).where(sql`${t.isBaseline} = 1`)],
+);
+
+/**
+ * A planned item (or planned owner draw): a one-off when `unit` is null (dated `start_date`),
+ * otherwise a schedule read by packages/core/src/recurrence.ts.
+ */
+export const forecastItems = sqliteTable(
+  "forecast_items",
+  {
+    id: text("id").primaryKey(),
+    scenarioId: text("scenario_id")
+      .notNull()
+      .references(() => forecastScenarios.id),
+    kind: text("kind", { enum: ["planned", "draw"] })
+      .notNull()
+      .default("planned"),
+    name: text("name").notNull(),
+    direction: text("direction", { enum: ["in", "out"] }).notNull(),
+    /** Positive cents. */
+    amount: integer("amount").notNull(),
+    unit: text("unit", { enum: ["day", "week", "month", "year"] }),
+    interval: integer("interval").notNull().default(1),
+    anchorDay: integer("anchor_day"),
+    startDate: text("start_date").notNull(),
+    endDate: text("end_date"),
+    maxOccurrences: integer("max_occurrences"),
+    accountId: text("account_id").references(() => accounts.id),
+    contactId: text("contact_id").references(() => contacts.id),
+    bankAccountId: text("bank_account_id").references(() => bankAccounts.id),
+    notes: text("notes"),
+    source: text("source", { enum: ["person", "assistant"] })
+      .notNull()
+      .default("person"),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    lastConfirmedAt: text("last_confirmed_at"),
+    archivedAt: text("archived_at"),
+    createdAt: text("created_at").notNull().default(now),
+    updatedAt: text("updated_at").notNull().default(now),
+  },
+  (t) => [
+    index("forecast_items_scenario_idx").on(t.scenarioId, t.archivedAt),
+    check("forecast_items_kind_ck", sql`${t.kind} in ('planned','draw')`),
+    check("forecast_items_direction_ck", sql`${t.direction} in ('in','out')`),
+    check("forecast_items_amount_pos", sql`${t.amount} > 0`),
+    check("forecast_items_draw_out", sql`${t.kind} <> 'draw' or ${t.direction} = 'out'`),
+  ],
+);
+
+/**
+ * A scenario's change to something it doesn't own: exclude a booked flow (an invoice, bill,
+ * recurring template, or planned item), or move it by `shift_days`. `target_type` is plain text
+ * with an app-level enum (reserves add `reserve_part`, matched by part and `target_date`).
+ */
+export const forecastOverrides = sqliteTable(
+  "forecast_overrides",
+  {
+    id: text("id").primaryKey(),
+    scenarioId: text("scenario_id")
+      .notNull()
+      .references(() => forecastScenarios.id),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id").notNull(),
+    /** The date a `reserve_part` override matches; '' for the other types (keeps the unique index exact). */
+    targetDate: text("target_date").notNull().default(""),
+    action: text("action", { enum: ["exclude", "shift"] }).notNull(),
+    shiftDays: integer("shift_days"),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("forecast_overrides_uq").on(t.scenarioId, t.targetType, t.targetId, t.targetDate),
+    check("forecast_overrides_action_ck", sql`${t.action} in ('exclude','shift')`),
+  ],
+);
+
+/**
+ * What a person said about one occurrence of a planned item: `linked` to the invoice, bill, or bank
+ * transaction it became, `rejected` (not this one; only hides that suggestion), or `skipped` (it
+ * didn't happen; no target). A `linked` or `skipped` row stops the occurrence counting.
+ */
+export const forecastLinks = sqliteTable(
+  "forecast_links",
+  {
+    id: text("id").primaryKey(),
+    itemId: text("item_id")
+      .notNull()
+      .references(() => forecastItems.id),
+    occurrenceDate: text("occurrence_date").notNull(),
+    status: text("status", { enum: ["linked", "rejected", "skipped"] }).notNull(),
+    targetType: text("target_type", { enum: ["invoice", "bill", "bank_transaction"] }),
+    /** '' for a skipped occurrence (keeps the unique index exact). */
+    targetId: text("target_id").notNull().default(""),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("forecast_links_uq").on(t.itemId, t.occurrenceDate, t.status, t.targetId),
+    index("forecast_links_target_idx").on(t.targetType, t.targetId),
+    check("forecast_links_status_ck", sql`${t.status} in ('linked','rejected','skipped')`),
+  ],
+);
+
+/** A saved custom window: how many weekly or monthly buckets, starting today. */
+export const forecastWindows = sqliteTable(
+  "forecast_windows",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    bucket: text("bucket", { enum: ["week", "month"] }).notNull(),
+    periods: integer("periods").notNull(),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    check("forecast_windows_bucket_ck", sql`${t.bucket} in ('week','month')`),
+    check("forecast_windows_periods_ck", sql`${t.periods} between 1 and 104`),
+  ],
+);
+
 export const csvProfiles = sqliteTable("csv_profiles", {
   id: text("id").primaryKey(),
   bankAccountId: text("bank_account_id")

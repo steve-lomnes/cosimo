@@ -2,6 +2,7 @@ export * from "./anchor.ts";
 export * from "./canonical.ts";
 export * from "./chain.ts";
 export * from "./coa.ts";
+export * from "./forecast.ts";
 export * from "./hash.ts";
 export * from "./import/index.ts";
 export * from "./importers/index.ts";

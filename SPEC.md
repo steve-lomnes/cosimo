@@ -434,6 +434,18 @@ One action produces a ZIP containing: P&L, Balance Sheet, Trial Balance, General
 
 Cash balance across bank accounts, income and expense for the current month and year to date, count of transactions needing review, receipts left in the inbox for more than 30 days, inbox receipts with no bank account waiting to be booked (linking to the receipts list filtered to them), overdue invoices, and bank connections needing attention.
 
+### 9.3 Cash forecast
+
+A forecast of cash from today, as weekly or monthly buckets (13 weeks and 12 months built in; any custom window of 1 to 104 buckets can be saved by name). It answers "how much can I draw?" and shows what that answer depends on. It is computed on read; nothing about it is a ledger record.
+
+- **Opening cash** is the dashboard's cash total (cards excluded). Card balances aren't projected; they are listed as an attention item.
+- **Flows** are open invoices (due date plus a collection lag, with an optional late share arriving later), open bills (on the due date), active recurring templates, entries waiting in review that move cash (pending payments, categorizations, proposed owner draws), and planned items a person or assistant enters. A date before today counts today. Payments waiting in review leave an invoice's or bill's open balance, so nothing is counted twice.
+- **Safe to draw** is the lowest projected balance over the window less the cash buffer, never below zero. The forecast also shows the outflows that set the low point, the ten largest drivers with how firm each is (booked, scheduled, pending, planned, draw), and an attention list: planned items past due or unconfirmed for 60 days, overdue invoices, stale bank feeds, card balances, suggested matches, and planned items that duplicate a recurring template.
+- **Scenarios** are what-ifs on top of one baseline: their own planned items, exclusions or shifts of booked items, and assumption overrides. A scenario can be duplicated, and its changes promoted into the baseline.
+- **Planned items** match their actuals by suggestion only (an invoice, bill, or bank transaction within a tolerance of amount and date); a person links, rejects, or skips each occurrence.
+- **Owner draws** are proposed from the forecast: Dr Owner Draw, Cr the bank account, through the review policy, with the forecast as the server computed it attached to the review item. A draw over capacity is never refused, but says so.
+- Scenarios, items, overrides, links, and windows apply at once and are audited. Assistants write only to scenarios their own connection created; the baseline changes only by a person promoting a scenario. Viewers can read; writing needs Owner or Bookkeeper.
+
 ---
 
 ## 10. API and MCP

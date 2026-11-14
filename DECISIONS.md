@@ -473,3 +473,36 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   after the code was issued, which compares a JavaScript timestamp with SQLite's, so a connection
   created in the same millisecond survived. Codes used before the column existed have no link and
   keep the time match, now inclusive (`>=`). Refresh rotates the same row, so the link holds.
+- **Forecasts are not ledger records** (#113): scenarios, planned items, overrides, links, and saved
+  windows are plans, not facts about the books, so they apply at once, are audited (`forecast.*`), and
+  are shared by the whole org. Going through review would make "what if I lose this client?" a
+  chore, and nothing in them can change a balance. They are exported and backed up like any table.
+  The one thing that does touch the ledger, an owner draw, goes through `submitEntryTx`.
+- **One baseline, scenarios hold only their changes** (#113): a scenario is its own planned items,
+  overrides of other items, and assumption overrides on top of the baseline, rather than a full copy.
+  Changing the baseline then reaches every scenario, and a scenario shows exactly what it changes.
+  The baseline row is created on the first forecast write; until then reads use the defaults.
+  Promoting moves chosen items, overrides, and assumption values into the baseline (re-parented, not
+  copied), so a scenario that turns out to be the plan becomes the plan.
+- **Pending entries count as forecast flows** (#113): an entry waiting in review that moves cash
+  (a customer payment, a categorization, a proposed owner draw) is expected to post, so it counts at
+  its date (or today), and the invoice or bill it pays leaves its open balance (`openBalance` with
+  pending applications counted). Otherwise a proposed draw would not lower "safe to draw", and a
+  payment waiting for approval would be counted twice.
+- **Matching planned items to actuals is suggested, never automatic** (#113): a wrong automatic link
+  would silently drop a planned outflow from the forecast. Suggestions are computed on read (amount
+  within 10%, date within 10 days for documents or 7 for bank transactions, same contact when the item
+  has one) and acted on by creating a link row (`linked`, `rejected`, `skipped`). `rejected` only
+  hides that pair; `linked` and `skipped` stop the occurrence counting.
+- **Agents write only to scenarios they own** (#113): a scenario records the OAuth client or API
+  token that created it, and only that client may write to it. An assistant can't edit the baseline
+  or another client's scenario, so a wrong assumption can't change the number the person plans a
+  draw on without their promoting it. Promote and archive are people only.
+- **An owner draw carries the forecast it was judged against** (#113): the server computes the
+  forecast itself and stores a snapshot (capacity, low point, assumptions, top drivers) in the review
+  item's payload, so the reviewer sees what the draw was weighed against and the client can't
+  misstate it. A draw over capacity is proposed, with `exceeds_capacity` set, rather than refused:
+  the owner decides what to draw. `owner_draw` is its own `source_type`.
+- **Forecast uniqueness columns use '' rather than NULL** (#113): SQLite treats NULLs as distinct in
+  a unique index, and drizzle-kit mangles expression indexes. `forecast_overrides.target_date` and
+  `forecast_links.target_id` are not null and hold '' when there is none; the API shows null.

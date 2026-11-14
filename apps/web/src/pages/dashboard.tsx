@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { api, unwrap } from "../api/client";
 import type { components } from "../api/schema";
 import { Amount, Badge, Card, cx, ErrorText, Loading, PageHeader, Table, td, th } from "../components/ui";
+import { useForecast } from "../lib/forecast";
 import { fmtDate, fmtDateTime, money } from "../lib/format";
 import { useOrg, useOrgId } from "../lib/org";
 
@@ -39,6 +40,7 @@ export function DashboardPage() {
 
 function DashboardBody({ d, orgId }: { d: Dashboard; orgId: string }) {
   const cur = d.currency;
+  const forecast = useForecast(orgId, undefined, undefined);
   return (
     <div className="space-y-4">
       <section aria-label="Needs attention" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
@@ -89,6 +91,19 @@ function DashboardBody({ d, orgId }: { d: Dashboard; orgId: string }) {
                 className={tileLink}
               >
                 Receipts
+              </Link>
+            }
+          />
+        )}
+        {forecast.data && (
+          <Tile
+            label="Safe to draw (13 weeks)"
+            value={money(forecast.data.draw_capacity.amount, cur)}
+            detail={`Low point ${money(forecast.data.low_point.balance, cur)}`}
+            attention={false}
+            link={
+              <Link to="/o/$orgId/forecast" params={{ orgId }} className={tileLink}>
+                Cash forecast
               </Link>
             }
           />
@@ -348,7 +363,7 @@ function Tile({
   link,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   detail?: string;
   attention: boolean;
   tone?: "amber" | "red";

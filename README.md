@@ -79,6 +79,8 @@ rent. See [what Cosimo doesn't do yet](#what-cosimo-doesnt-do-yet) before you sw
   repeat transactions automatically, and suggestions learn from what you did last time.
 - Bank and credit card reconciliation.
 - Receipts and attachments on any transaction, stored locally or in S3-compatible storage.
+- A cash forecast (13 weeks or 12 months) built from open invoices and bills, recurring templates, and
+  planned items, with what-if scenarios and a "safe to draw" figure for owner draws.
 
 **Getting paid and paying bills**
 - Invoices with your logo, emailed as PDFs over your own SMTP, with partial payments, credits, and

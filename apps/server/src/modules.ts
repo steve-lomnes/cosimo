@@ -7,6 +7,7 @@ import { registerApiModule, registerRootMount } from "./http/app.ts";
 import { bankingRoutes } from "./http/routes/banking.ts";
 import { documentRoutes } from "./http/routes/documents.ts";
 import { exportRoutes } from "./http/routes/exports.ts";
+import { forecastRoutes } from "./http/routes/forecast.ts";
 import { ledgerRoutes } from "./http/routes/ledger.ts";
 import { mountMcp } from "./http/routes/mcp.ts";
 import { mountOAuth, oauthRoutes } from "./http/routes/oauth.ts";
@@ -98,3 +99,6 @@ registerApiModule(notesRoutes);
 import { insightsRoutes } from "./http/routes/insights.ts";
 
 registerApiModule(insightsRoutes);
+
+// Cash forecast (#113, SPEC §9.3)
+registerApiModule(forecastRoutes);

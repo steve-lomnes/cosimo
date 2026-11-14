@@ -6,6 +6,7 @@ import { BillPage, BillsPage, NewBillPage } from "./pages/bills";
 import { CategorizePage } from "./pages/categorize";
 import { ContactsPage } from "./pages/contacts";
 import { EntriesPage, EntryPage, NewEntryPage, validateEntrySearch } from "./pages/entries";
+import { ForecastPage, validateForecastSearch } from "./pages/forecast";
 import { InvoicePage, InvoicesPage, NewInvoicePage } from "./pages/invoices";
 import { OpeningBalancesPage } from "./pages/ledger-settings";
 import { NewReceiptPage, ReceiptPage, ReceiptsPage, validateReceiptsSearch } from "./pages/receipts";
@@ -38,6 +39,7 @@ export function orgChildRoutes(parent: AnyRoute): AnyRoute[] {
     r("/accounting/entries/recurring/$templateId/edit", () => <RecurringForm kind="entry" />),
     r("/accounting/entries/$entryId", EntryPage, msgSearch),
     r("/reports", ReportsPage, validateReportSearch),
+    r("/forecast", ForecastPage, validateForecastSearch),
     r("/banking/accounts", BankAccountsPage),
     r("/banking/import", ImportPage, (s) => ({
       account: typeof s.account === "string" ? s.account : undefined,

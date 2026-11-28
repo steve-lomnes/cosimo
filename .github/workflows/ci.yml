@@ -39,10 +39,11 @@ jobs:
         if: matrix.db == 'sqld'
         run: |
           # Pinned by hand to the multi-arch index digest; Dependabot doesn't track image refs
-          # inside run: steps.
+          # inside run: steps. A full run creates ~150 namespaces; past sqld's default of 100 loaded,
+          # eviction can unload a namespace it just created and the next request is a 404, so raise it.
           docker run -d --name sqld -p 8080:8080 -p 8081:8081 \
             ghcr.io/tursodatabase/libsql-server:v0.24.32@sha256:dedf5273da945d90f3b85fe367ed8f821349117ac2c488bf43c4a6bf9f2123e0 \
-            /bin/sqld --enable-namespaces --admin-listen-addr 0.0.0.0:8081
+            /bin/sqld --enable-namespaces --max-active-namespaces 1000 --admin-listen-addr 0.0.0.0:8081
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/health && break; sleep 1; done
       - name: bun run test
         run: bun run test

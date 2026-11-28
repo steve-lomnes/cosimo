@@ -21,6 +21,10 @@ if (process.env.COSIMO_TEST_DB === "sqld" && !process.env.COSIMO_TEST_SQLD_URL) 
       "--db-path",
       join(dir, "data"),
       "--enable-namespaces",
+      // A full run creates ~150 namespaces. Past sqld's default of 100 loaded, it evicts, and
+      // eviction can unload a namespace it just created, so the next request is a 404.
+      "--max-active-namespaces",
+      "1000",
       "--http-listen-addr",
       `127.0.0.1:${port}`,
       "--admin-listen-addr",

@@ -3,10 +3,12 @@
  * money in the bank for asset accounts, amount owed for credit cards (liabilities).
  */
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
+import type { Actor } from "@cosimo/shared";
 import { and, asc, desc, eq, inArray, lte, ne, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
 import { renderReportPdf } from "../pdf/index.ts";
 import type { ActorInfo } from "./actor.ts";
+import { listAttachments } from "./attachments.ts";
 import { appendAudit } from "./audit.ts";
 import { csvCell } from "./reports.ts";
 
@@ -66,6 +68,11 @@ export function reconView(r: ReconRow) {
   };
 }
 
+/** The page of a reconciliation in the web app, where a person uploads the statement and completes it. */
+export function reconcileUrl(publicUrl: string, orgId: string, id: string) {
+  return `${publicUrl.replace(/\/$/, "")}/o/${orgId}/banking/reconcile/${id}`;
+}
+
 export async function listRecons(db: Reader, accountId?: string) {
   const rows = await db
     .select()
@@ -73,14 +80,40 @@ export async function listRecons(db: Reader, accountId?: string) {
     .where(accountId ? eq(org.reconciliations.bankAccountId, accountId) : undefined)
     .orderBy(desc(org.reconciliations.statementEndDate), desc(org.reconciliations.createdAt))
     .all();
-  return rows.map(reconView);
+  const files = await db
+    .select({
+      id: org.attachmentLinks.targetId,
+      n: sql<number>`count(*)`,
+    })
+    .from(org.attachmentLinks)
+    .where(eq(org.attachmentLinks.targetType, "reconciliation"))
+    .groupBy(org.attachmentLinks.targetId)
+    .all();
+  const fileCount = new Map(files.map((f) => [f.id, Number(f.n)]));
+  const flags = await db
+    .select({ id: org.reconciliationFlags.reconciliationId, n: sql<number>`count(*)` })
+    .from(org.reconciliationFlags)
+    .where(eq(org.reconciliationFlags.status, "open"))
+    .groupBy(org.reconciliationFlags.reconciliationId)
+    .all();
+  const openFlags = new Map(flags.map((f) => [f.id, Number(f.n)]));
+  return rows.map((r) => ({
+    ...reconView(r),
+    statement_count: fileCount.get(r.id) ?? 0,
+    open_flag_count: openFlags.get(r.id) ?? 0,
+  }));
 }
 
 export async function startReconTx(
   tx: OrgTx,
   orgId: string,
   a: ActorInfo,
-  input: { account_id: string; statement_end_date: string; statement_ending_balance: number },
+  input: {
+    account_id: string;
+    statement_end_date: string;
+    statement_ending_balance: number;
+    rationale?: string;
+  },
 ) {
   await ledgerAccount(tx, input.account_id);
   const open = await tx
@@ -174,6 +207,8 @@ export async function reconLines(db: Reader, id: string) {
     .all();
   return {
     reconciliation: reconView(r),
+    flags: await listFlags(db, id),
+    statements: await listAttachments(db, { type: "reconciliation", id }),
     lines: lines
       .filter(
         (l) =>
@@ -189,6 +224,191 @@ export async function reconLines(db: Reader, id: string) {
         cleared: mine.has(l.id),
       })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Flags: what a statement shows that the books don't (or the reverse)
+// ---------------------------------------------------------------------------
+
+export const FLAG_KINDS = [
+  "missing_from_books",
+  "not_on_statement",
+  "mismatch",
+  "beginning_balance",
+  "other",
+] as const;
+export type FlagKind = (typeof FLAG_KINDS)[number];
+type FlagRow = typeof org.reconciliationFlags.$inferSelect;
+
+export function flagView(f: FlagRow) {
+  return {
+    id: f.id,
+    reconciliation_id: f.reconciliationId,
+    kind: f.kind,
+    date: f.date,
+    amount: f.amount,
+    journal_line_id: f.journalLineId,
+    description: f.description,
+    status: f.status,
+    created_by: f.createdBy,
+    created_actor: f.createdActor as Actor,
+    created_at: f.createdAt,
+    resolved_by: f.resolvedBy,
+    resolved_actor: f.resolvedActor as Actor | null,
+    resolved_at: f.resolvedAt,
+    resolution_note: f.resolutionNote,
+  };
+}
+
+export async function listFlags(db: Reader, reconId: string) {
+  const rows = await db
+    .select()
+    .from(org.reconciliationFlags)
+    .where(eq(org.reconciliationFlags.reconciliationId, reconId))
+    .orderBy(asc(org.reconciliationFlags.createdAt), asc(org.reconciliationFlags.id))
+    .all();
+  return rows.map(flagView);
+}
+
+export async function mustGetFlag(db: Reader, id: string) {
+  const f = await db.select().from(org.reconciliationFlags).where(eq(org.reconciliationFlags.id, id)).get();
+  if (!f) throw notFound("Flag");
+  return f;
+}
+
+export interface FlagInput {
+  kind: FlagKind;
+  description: string;
+  date?: string | null;
+  amount?: number | null;
+  journal_line_id?: string | null;
+}
+
+export async function createFlagTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  reconId: string,
+  input: FlagInput,
+) {
+  const r = await mustGetRecon(tx, reconId);
+  if (r.status !== "in_progress")
+    throw conflict("Flags can only be added to a reconciliation in progress.", "invalid_state");
+  const description = input.description.trim();
+  if (!description) throw unprocessable("Describe the problem.", "invalid_flag");
+  const date = input.date ?? null;
+  const amount = input.amount ?? null;
+  const lineId = input.journal_line_id ?? null;
+  const need = (ok: boolean, what: string) => {
+    if (!ok) throw unprocessable(`A ${input.kind.replace(/_/g, " ")} flag needs ${what}.`, "invalid_flag");
+  };
+  if (input.kind === "missing_from_books") need(date != null && amount != null, "a date and an amount");
+  else if (input.kind === "not_on_statement") need(lineId != null, "a journal line");
+  else if (input.kind === "mismatch")
+    need(
+      lineId != null && (amount != null || date != null),
+      "a journal line and the statement's amount or date",
+    );
+  else if (input.kind === "beginning_balance") need(amount != null, "the statement's opening balance");
+  if (lineId) {
+    const line = await tx
+      .select({ id: org.journalLines.id })
+      .from(org.journalLines)
+      .innerJoin(org.journalEntries, eq(org.journalEntries.id, org.journalLines.entryId))
+      .where(
+        and(
+          eq(org.journalLines.id, lineId),
+          eq(org.journalLines.accountId, r.bankAccountId),
+          eq(org.journalEntries.status, "posted"),
+        ),
+      )
+      .get();
+    if (!line)
+      throw unprocessable(
+        "That line is not a posted line of this reconciliation's account.",
+        "invalid_lines",
+      );
+  }
+  const dup = await tx
+    .select({ id: org.reconciliationFlags.id })
+    .from(org.reconciliationFlags)
+    .where(
+      and(
+        eq(org.reconciliationFlags.reconciliationId, reconId),
+        eq(org.reconciliationFlags.status, "open"),
+        eq(org.reconciliationFlags.kind, input.kind),
+        lineId
+          ? eq(org.reconciliationFlags.journalLineId, lineId)
+          : and(
+              sql`${org.reconciliationFlags.journalLineId} is null`,
+              date == null
+                ? sql`${org.reconciliationFlags.date} is null`
+                : eq(org.reconciliationFlags.date, date),
+              amount == null
+                ? sql`${org.reconciliationFlags.amount} is null`
+                : eq(org.reconciliationFlags.amount, amount),
+            ),
+      ),
+    )
+    .get();
+  if (dup && (lineId || input.kind !== "other"))
+    throw conflict("An open flag for this item already exists.", "duplicate_flag", { id: dup.id });
+  const id = newId();
+  await tx.insert(org.reconciliationFlags).values({
+    id,
+    reconciliationId: reconId,
+    kind: input.kind,
+    date,
+    amount,
+    journalLineId: lineId,
+    description,
+    createdBy: a.userId,
+    createdActor: a.actor,
+  });
+  const view = flagView(await mustGetFlag(tx, id));
+  await appendAudit(tx, orgId, a, {
+    action: "reconciliation.flag",
+    targetType: "reconciliation",
+    targetId: reconId,
+    after: view,
+  });
+  return view;
+}
+
+/** People resolve or dismiss any flag; the agent resolves only flags it raised, and never dismisses. */
+export async function resolveFlagTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  flagId: string,
+  input: { status: "resolved" | "dismissed"; note?: string | null },
+) {
+  const f = await mustGetFlag(tx, flagId);
+  // Assistants and propose-only tokens resolve only flags their kind of actor raised, and never dismiss.
+  if (a.actor === "mcp" || a.proposeOnly) {
+    if (input.status !== "resolved") throw forbidden("Only a person can dismiss a flag.");
+    if (f.createdActor !== a.actor) throw forbidden("You can resolve only flags you raised.");
+  }
+  if (f.status !== "open") throw conflict(`This flag is already ${f.status}.`, "invalid_state");
+  await tx
+    .update(org.reconciliationFlags)
+    .set({
+      status: input.status,
+      resolvedBy: a.userId,
+      resolvedActor: a.actor,
+      resolvedAt: new Date().toISOString(),
+      resolutionNote: input.note?.trim() || null,
+    })
+    .where(eq(org.reconciliationFlags.id, flagId));
+  const view = flagView(await mustGetFlag(tx, flagId));
+  await appendAudit(tx, orgId, a, {
+    action: "reconciliation.flag_resolve",
+    targetType: "reconciliation",
+    targetId: f.reconciliationId,
+    before: flagView(f),
+    after: view,
+  });
+  return view;
 }
 
 async function recompute(tx: OrgTx, r: ReconRow, sign: number) {
@@ -248,8 +468,20 @@ export async function toggleLinesTx(tx: OrgTx, id: string, lineIds: string[], cl
 }
 
 export async function completeReconTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string) {
+  // Defense in depth: no MCP tool completes, and a propose-only token must not either.
+  if (a.actor === "mcp" || a.proposeOnly) throw forbidden("Only a person can complete a reconciliation.");
   const r = await mustGetRecon(tx, id);
   if (r.status !== "in_progress") throw conflict(`This reconciliation is ${r.status}.`, "invalid_state");
+  const open = await tx
+    .select({ n: sql<number>`count(*)` })
+    .from(org.reconciliationFlags)
+    .where(and(eq(org.reconciliationFlags.reconciliationId, id), eq(org.reconciliationFlags.status, "open")))
+    .get();
+  if (Number(open?.n ?? 0) > 0)
+    throw unprocessable(
+      "Resolve or dismiss the open flags before completing this reconciliation.",
+      "open_flags",
+    );
   if (r.clearedBalance !== r.statementEndingBalance) {
     throw unprocessable(
       `The cleared balance differs from the statement by ${((r.statementEndingBalance - r.clearedBalance) / 100).toFixed(2)}.`,
@@ -275,6 +507,11 @@ export async function discardReconTx(tx: OrgTx, orgId: string, a: ActorInfo, id:
   if (r.status !== "in_progress")
     throw conflict("Only a reconciliation in progress can be discarded.", "invalid_state");
   await tx.delete(org.reconciliationItems).where(eq(org.reconciliationItems.reconciliationId, id));
+  await tx.delete(org.reconciliationFlags).where(eq(org.reconciliationFlags.reconciliationId, id));
+  // Unlink the statements; the files stay, like other unlinked attachments.
+  await tx
+    .delete(org.attachmentLinks)
+    .where(and(eq(org.attachmentLinks.targetType, "reconciliation"), eq(org.attachmentLinks.targetId, id)));
   await tx.delete(org.reconciliations).where(eq(org.reconciliations.id, id));
   await appendAudit(tx, orgId, a, {
     action: "reconciliation.discard",
@@ -352,7 +589,7 @@ function csv(rows: (string | number | null)[][]) {
 
 /** Reconciliation report as CSV and PDF, for the export endpoint and the year-end package. */
 export async function reconciliationFiles(db: Reader, reconId: string, orgName: string, generatedAt: string) {
-  const { reconciliation: rec, lines } = await reconLines(db, reconId);
+  const { reconciliation: rec, lines, flags } = await reconLines(db, reconId);
   const acct = await db.select().from(org.accounts).where(eq(org.accounts.id, rec.account_id)).get();
   const cleared = lines.filter((l) => l.cleared);
   const open = lines.filter((l) => !l.cleared);
@@ -375,6 +612,21 @@ export async function reconciliationFiles(db: Reader, reconId: string, orgName: 
       (l.amount / 100).toFixed(2),
       l.cleared ? "yes" : "no",
     ]),
+    ...(flags.length
+      ? [
+          [],
+          ["Flags"],
+          ["kind", "date", "amount", "description", "status", "note"],
+          ...flags.map((f) => [
+            f.kind,
+            f.date,
+            f.amount == null ? "" : (f.amount / 100).toFixed(2),
+            f.description,
+            f.status,
+            f.resolution_note,
+          ]),
+        ]
+      : []),
   ]);
   const pdf = await renderReportPdf({
     title: `Reconciliation: ${acct?.name ?? ""}`,
@@ -399,6 +651,20 @@ export async function reconciliationFiles(db: Reader, reconId: string, orgName: 
         depth: 1,
         cells: [l.date, l.memo ?? l.description ?? "", l.amount],
       })),
+      ...(flags.length
+        ? [
+            { kind: "header" as const, cells: ["Flags", null, null] },
+            ...flags.map((f) => ({
+              kind: "row" as const,
+              depth: 1,
+              cells: [
+                f.date ?? "",
+                `${f.kind.replace(/_/g, " ")} (${f.status}): ${f.description}${f.resolution_note ? ` - ${f.resolution_note}` : ""}`,
+                f.amount,
+              ],
+            })),
+          ]
+        : []),
     ],
     footer: [`Generated ${generatedAt}`],
   });

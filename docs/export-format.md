@@ -88,7 +88,7 @@ The tables most readers want:
 | `provider_adjustments`, `provider_payouts` | Stripe refunds and dispute movements against recorded payments (with the entry proposed for each), and Stripe payouts (with the bank transaction and transfer entry they were matched to) |
 | `bank_accounts`, `bank_transactions` | Bank and card accounts and their imported or synced transactions |
 | `receipts` | The receipt inbox: each receipt's fields (`paid_with_note` says how it was paid when not from a bank account), `status` (inbox, matched, booked, dismissed), the bank transaction it is matched to (`matched_bank_txn_id`) or suggested for, and the bill or entry it was booked to. Its files are the `attachment_links` rows with `target_type = "receipt"`. Exports from before schema `0011_owner_paid_receipts` carry one file in `receipts.attachment_id`; importing them moves it into the links |
-| `reconciliations`, `reconciliation_items` | Completed and in-progress reconciliations |
+| `reconciliations`, `reconciliation_items`, `reconciliation_flags` | Completed and in-progress reconciliations, and the flags raised on them |
 | `rules`, `review_items`, `review_policy` | Categorization rules and the review queue |
 | `attachments`, `attachment_links` | Attachment metadata; the bytes are in `attachments/<storage_key>` |
 | `audit_log`, `chain_checkpoints` | The audit chain and recorded chain heads |

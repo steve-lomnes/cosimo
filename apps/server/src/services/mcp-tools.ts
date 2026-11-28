@@ -17,6 +17,9 @@
  * goes through review. get_receipt sends the receipt's images after its JSON (`withContent`). Booking
 a receipt as an entry or bill goes through review like create_manual_entry and create_bill_draft;
 linking an existing file to a record applies directly and is audited.
+ * Reconciliation tools work the same way: starting one, clearing lines, and flagging or resolving a flag
+ * apply directly and are audited, but completing, discarding, and undoing are a person's. The assistant
+ * resolves only flags it raised. Statements are uploaded in the web app; read_statement returns them.
  * Recurring templates are proposed too, and nothing runs until a person approves. An assistant may
  * withdraw its own pending proposals, which ends them as rejected. There is no tool to approve,
  * reject, void, delete, or move lock dates.
@@ -31,6 +34,7 @@ import { forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { OrgScope } from "../http/types.ts";
 import { listAccounts } from "./accounts.ts";
 import { linkAttachmentTx, listAttachments, mustGetAttachment, storeBlob } from "./attachments.ts";
+import { appendAudit } from "./audit.ts";
 import {
   categorizeTx,
   countBankTxns,
@@ -89,6 +93,17 @@ import {
   unmatchReceiptTx,
   updateReceiptTx,
 } from "./receipts.ts";
+import {
+  createFlagTx,
+  FLAG_KINDS,
+  listRecons,
+  mustGetRecon,
+  reconcileUrl,
+  reconLines,
+  resolveFlagTx,
+  startReconTx,
+  toggleLinesTx,
+} from "./reconcile.ts";
 import {
   inputOf,
   listTemplates,
@@ -1532,6 +1547,50 @@ function receiptOut(t: ToolCtx, r: ReceiptView) {
   return { receipt: r, attach_url: receiptAttachUrl(t.ctx.config.server.public_url, t.scope.id, r.id) };
 }
 
+/**
+ * A record's files as MCP content after the tool's JSON: a PDF as an embedded resource, an image as
+ * image content. A file that is missing or can't be shown becomes a note. `hint` says what to do then.
+ */
+async function filesAsContent(
+  t: ToolCtx,
+  files: { id: string; filename: string }[],
+  max: number,
+  hint: string,
+) {
+  const db = t.scope.handle.db;
+  const extra: McpContent[] = [];
+  const notes: string[] = [];
+  const base = t.ctx.config.server.public_url.replace(/\/$/, "");
+  for (const f of files.slice(0, max)) {
+    const att = await mustGetAttachment(db, f.id);
+    const bytes = await (t.ctx.services.storage as BlobStore).get(att.storageKey);
+    if (!bytes) notes.push(`The file ${f.filename} is missing from storage.`);
+    else if (att.mimeType === "application/pdf") {
+      extra.push({
+        type: "resource",
+        resource: {
+          uri: `${base}/api/v1/orgs/${t.scope.id}/attachments/${f.id}`,
+          mimeType: "application/pdf",
+          blob: Buffer.from(bytes).toString("base64"),
+        },
+      });
+    } else {
+      const img = await assistantImage(bytes, att.mimeType);
+      if (img)
+        extra.push({
+          type: "image",
+          data: Buffer.from(img.data).toString("base64"),
+          mimeType: img.mimeType,
+        });
+      else
+        notes.push(
+          `The file ${f.filename} can't be shown to you (an unsupported or very large image). ${hint}`,
+        );
+    }
+  }
+  return { extra, notes };
+}
+
 /** The largest file `create_receipt` accepts as base64, decoded. */
 export const MCP_RECEIPT_MAX_BYTES = 10 * 1024 * 1024;
 /** How many of a receipt's files `get_receipt` sends. */
@@ -1580,36 +1639,12 @@ tool({
       ...receiptOut(t, view),
       candidates: await receiptCandidates(db, r.id),
     };
-    const extra: McpContent[] = [];
-    const notes: string[] = [];
-    const base = t.ctx.config.server.public_url.replace(/\/$/, "");
-    for (const f of view.attachments.slice(0, MCP_RECEIPT_MAX_FILES)) {
-      const att = await mustGetAttachment(db, f.id);
-      const bytes = await (t.ctx.services.storage as BlobStore).get(att.storageKey);
-      if (!bytes) notes.push(`The file ${f.filename} is missing from storage.`);
-      else if (att.mimeType === "application/pdf") {
-        extra.push({
-          type: "resource",
-          resource: {
-            uri: `${base}${f.download_url}`,
-            mimeType: "application/pdf",
-            blob: Buffer.from(bytes).toString("base64"),
-          },
-        });
-      } else {
-        const img = await assistantImage(bytes, att.mimeType);
-        if (img)
-          extra.push({
-            type: "image",
-            data: Buffer.from(img.data).toString("base64"),
-            mimeType: img.mimeType,
-          });
-        else
-          notes.push(
-            `The file ${f.filename} can't be shown to you (an unsupported or very large image). Ask the person for the receipt's details, or to replace the file with a JPEG at attach_url.`,
-          );
-      }
-    }
+    const { extra, notes } = await filesAsContent(
+      t,
+      view.attachments,
+      MCP_RECEIPT_MAX_FILES,
+      "Ask the person for the receipt's details, or to replace the file with a JPEG at attach_url.",
+    );
     if (!view.attachments.length)
       notes.push("No file is attached to this receipt yet; the person can add one at attach_url.");
     else if (view.attachments.length > MCP_RECEIPT_MAX_FILES)
@@ -1789,7 +1824,14 @@ tool({
   },
 });
 
-const ATTACHMENT_TARGETS_MCP = ["journal_entry", "bill", "invoice", "receipt", "bank_transaction"] as const;
+const ATTACHMENT_TARGETS_MCP = [
+  "journal_entry",
+  "bill",
+  "invoice",
+  "receipt",
+  "bank_transaction",
+  "reconciliation",
+] as const;
 type McpAttachmentTarget = (typeof ATTACHMENT_TARGETS_MCP)[number];
 
 /** Refuses a target that doesn't exist (linkAttachmentTx doesn't check). */
@@ -1800,6 +1842,7 @@ async function assertTargetExists(db: OrgDb | OrgTx, type: McpAttachmentTarget, 
     invoice: org.invoices,
     receipt: org.receipts,
     bank_transaction: org.bankTransactions,
+    reconciliation: org.reconciliations,
   }[type];
   const row = await db.select({ id: table.id }).from(table).where(eq(table.id, id)).get();
   if (!row) throw notFound(`The ${type.replace("_", " ")} ${id}`);
@@ -1809,7 +1852,7 @@ tool({
   name: "list_attachments",
   title: "Files on a record",
   description:
-    "The files (receipts, bill PDFs) linked to a journal entry, bill, invoice, receipt, or bank transaction, newest first, with their attachment IDs. Use an ID with link_attachment to link the same file to another record. download_url needs the person's sign-in; to see a receipt's image, use get_receipt.",
+    "The files (receipts, bill PDFs) linked to a journal entry, bill, invoice, receipt, bank transaction, or reconciliation (its statements), newest first, with their attachment IDs. Use an ID with link_attachment to link the same file to another record. download_url needs the person's sign-in; to see a receipt's image, use get_receipt.",
   money: false,
   input: z.object({
     target_type: z.enum(ATTACHMENT_TARGETS_MCP),
@@ -1833,7 +1876,7 @@ tool({
   name: "link_attachment",
   title: "Link a file to another record",
   description:
-    "Link a file that is already in Cosimo (an attachment ID from list_attachments or a receipt's attachments) to a journal entry, bill, invoice, receipt, or bank transaction, for example a receipt's photo to the entry that books it. The file is not copied, and its other links stay. Linking to a receipt adds it to the receipt's files (and to the records the receipt is matched or booked to). This applies directly and is recorded in the audit log; it is not a proposal and doesn't go to the review queue. Uploading a new file isn't possible here: give the person a receipt's attach_url instead.",
+    "Link a file that is already in Cosimo (an attachment ID from list_attachments or a receipt's attachments) to a journal entry, bill, invoice, receipt, bank transaction, or reconciliation (as a statement), for example a receipt's photo to the entry that books it. The file is not copied, and its other links stay. Linking to a receipt adds it to the receipt's files (and to the records the receipt is matched or booked to). This applies directly and is recorded in the audit log; it is not a proposal and doesn't go to the review queue. Uploading a new file isn't possible here: give the person a receipt's attach_url instead.",
   write: true,
   money: false,
   input: z.object({
@@ -1856,6 +1899,201 @@ tool({
       target,
       message: "Linked. Files apply directly; this did not go to the review queue.",
     };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Reconciliation: the agent prepares it; a person uploads the statement and completes it
+// ---------------------------------------------------------------------------
+
+/** How many of a reconciliation's statement files `read_statement` sends. */
+const MCP_STATEMENT_MAX_FILES = 2;
+const RECON_FLOW =
+  "Reconciliation applies directly and is recorded in the audit log; it is not a proposal and doesn't go to the review queue. Only a person can complete, discard, or undo a reconciliation: give them reconcile_url, where they upload the statement, resolve or dismiss open flags, and click Complete.";
+
+function reconOut(t: ToolCtx, r: { id: string }) {
+  return { reconcile_url: reconcileUrl(t.ctx.config.server.public_url, t.scope.id, r.id) };
+}
+
+tool({
+  name: "list_reconciliations",
+  title: "List reconciliations",
+  description: `Reconciliations, newest statement first, each with statement_count (files attached), open_flag_count, and reconcile_url. Filter by account, status, or has_statement: false lists reconciliations (completed ones too) that have no statement yet, so you can hand the person their reconcile_url to upload it. ${RECON_FLOW}`,
+  money: true,
+  input: z.object({
+    account_id: z.string().optional().describe("The ledger account ID or code of the bank or card account"),
+    status: z.enum(["in_progress", "completed", "undone"]).optional(),
+    has_statement: z.boolean().optional().describe("true: with a statement file; false: without one"),
+  }),
+  async run(t, i) {
+    const account = i.account_id ? await accountId(t, i.account_id) : undefined;
+    const rows = await listRecons(t.scope.handle.db, account);
+    return {
+      data: rows
+        .filter((r) => !i.status || r.status === i.status)
+        .filter((r) => i.has_statement === undefined || r.statement_count > 0 === i.has_statement)
+        .map((r) => ({ ...r, ...reconOut(t, r) })),
+    };
+  },
+});
+
+tool({
+  name: "get_reconciliation",
+  title: "A reconciliation with its lines and flags",
+  description: `One reconciliation: its balances and difference, the candidate lines (id, date, memo, amount in statement sign, cleared), its flags, its statement files (metadata only; read them with read_statement), and reconcile_url. ${RECON_FLOW}`,
+  money: true,
+  input: z.object({ reconciliation_id: z.string() }),
+  async run(t, i) {
+    const d = await reconLines(t.scope.handle.db, i.reconciliation_id);
+    return {
+      reconciliation: d.reconciliation,
+      lines: d.lines.map((l) => ({
+        id: l.id,
+        date: l.date,
+        memo: l.memo ?? l.description,
+        amount: l.amount,
+        cleared: l.cleared,
+      })),
+      flags: d.flags,
+      statements: d.statements,
+      ...reconOut(t, d.reconciliation),
+    };
+  },
+});
+
+tool({
+  name: "read_statement",
+  title: "Read a reconciliation's statement",
+  description: `The statement files attached to a reconciliation (up to ${MCP_STATEMENT_MAX_FILES}, newest first), after the JSON: a PDF as an embedded resource, an image as image content. Read it, compare it with get_reconciliation's lines, clear the lines that match (clear_reconciliation_lines), and flag the rest (flag_reconciliation_item). It is separate from get_reconciliation so checking the state again doesn't resend the file. If none is attached, give the person reconcile_url to upload it.`,
+  money: false,
+  input: z.object({ reconciliation_id: z.string() }),
+  async run(t, i) {
+    const db = t.scope.handle.db;
+    const r = await mustGetRecon(db, i.reconciliation_id);
+    const files = await listAttachments(db, { type: "reconciliation", id: r.id });
+    const { extra, notes } = await filesAsContent(
+      t,
+      files,
+      MCP_STATEMENT_MAX_FILES,
+      "Ask the person to read you the figures, or to upload a PDF or JPEG at reconcile_url.",
+    );
+    const out: Record<string, unknown> = {
+      reconciliation_id: r.id,
+      statements: files,
+      ...reconOut(t, r),
+    };
+    if (!files.length)
+      notes.push("No statement is attached yet. Give the person reconcile_url so they can upload it.");
+    else if (files.length > MCP_STATEMENT_MAX_FILES)
+      notes.push(
+        `Only the first ${MCP_STATEMENT_MAX_FILES} of its ${files.length} files are shown; the person can see them all at reconcile_url.`,
+      );
+    if (notes.length) out.note = notes.join(" ");
+    return withContent(out, extra);
+  },
+});
+
+tool({
+  name: "start_reconciliation",
+  title: "Start reconciling an account",
+  description: `Start a reconciliation of a bank, card, or other balance sheet account against a statement, with the statement's end date and ending balance (read from a statement the person shared). Only one can be in progress per account. The result includes reconcile_url: give it to the person so they can upload the statement file. ${RECON_FLOW}`,
+  write: true,
+  money: true,
+  input: z.object({
+    account_id: z.string().describe("Account ID or code of the account being reconciled"),
+    statement_end_date: IsoDate,
+    statement_ending_balance: cents("The statement's ending balance, in the statement's sign."),
+    rationale: z.string().min(3).max(2000).describe("Why you are starting it; recorded in the audit log."),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const account = await accountId(t, i.account_id);
+    const r = await t.scope.handle.write((tx) =>
+      startReconTx(tx, t.scope.id, t.scope.actor, {
+        account_id: account,
+        statement_end_date: i.statement_end_date,
+        statement_ending_balance: i.statement_ending_balance,
+        rationale: i.rationale,
+      }),
+    );
+    return {
+      reconciliation: r,
+      ...reconOut(t, r),
+      message:
+        "Started. Give the person reconcile_url so they can upload the statement; meanwhile clear matching lines with clear_reconciliation_lines.",
+    };
+  },
+});
+
+tool({
+  name: "clear_reconciliation_lines",
+  title: "Mark reconciliation lines cleared or uncleared",
+  description: `Mark lines of an in-progress reconciliation cleared (they appear on the statement) or uncleared. Line IDs come from get_reconciliation. Returns the reconciliation with its \`difference\` (statement ending balance minus cleared balance); it must be 0 before a person can complete it. ${RECON_FLOW}`,
+  write: true,
+  money: true,
+  input: z.object({
+    reconciliation_id: z.string(),
+    line_ids: z.array(z.string()).min(1).max(500),
+    cleared: z.boolean(),
+    rationale: z
+      .string()
+      .min(3)
+      .max(2000)
+      .describe("Why these lines match the statement; recorded in the audit log."),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write(async (tx) => {
+      const view = await toggleLinesTx(tx, i.reconciliation_id, i.line_ids, i.cleared);
+      await appendAudit(tx, t.scope.id, t.scope.actor, {
+        action: "reconciliation.clear",
+        targetType: "reconciliation",
+        targetId: i.reconciliation_id,
+        after: { line_ids: i.line_ids, cleared: i.cleared, rationale: i.rationale },
+      });
+      return view;
+    });
+    return { reconciliation: r, ...reconOut(t, r) };
+  },
+});
+
+tool({
+  name: "flag_reconciliation_item",
+  title: "Flag something that does not reconcile",
+  description: `Flag a difference between the statement and the books on an in-progress reconciliation. While any flag is open, a person cannot complete it. kind: \`missing_from_books\` (on the statement, not in Cosimo; needs date, amount, description), \`not_on_statement\` (a Cosimo line the statement doesn't show; needs journal_line_id), \`mismatch\` (same item, different amount or date; needs journal_line_id and the statement's amount or date), \`beginning_balance\` (the statement's opening balance differs from the reconciliation's; amount is the statement's), or \`other\`. amount is the statement's figure in statement sign. After the fix lands (for example a missing transaction is booked), resolve your own flag with resolve_reconciliation_flag. ${RECON_FLOW}`,
+  write: true,
+  money: true,
+  input: z.object({
+    reconciliation_id: z.string(),
+    kind: z.enum(FLAG_KINDS),
+    description: z.string().min(1).max(1000),
+    date: IsoDate.optional(),
+    amount: cents("The statement's figure, in statement sign.").optional(),
+    journal_line_id: z.string().optional().describe("A line ID from get_reconciliation"),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const { reconciliation_id, ...input } = i;
+    const flag = await t.scope.handle.write((tx) =>
+      createFlagTx(tx, t.scope.id, t.scope.actor, reconciliation_id, input),
+    );
+    return { flag, ...reconOut(t, { id: reconciliation_id }) };
+  },
+});
+
+tool({
+  name: "resolve_reconciliation_flag",
+  title: "Resolve a flag you raised",
+  description: `Mark a flag you raised as resolved, with a note on what fixed it, once the fix has landed. You can resolve only flags you created, and you cannot dismiss any; a person resolves or dismisses the rest. ${RECON_FLOW}`,
+  write: true,
+  money: false,
+  input: z.object({ flag_id: z.string(), note: z.string().min(1).max(1000) }),
+  async run(t, i) {
+    requireWriter(t);
+    const flag = await t.scope.handle.write((tx) =>
+      resolveFlagTx(tx, t.scope.id, t.scope.actor, i.flag_id, { status: "resolved", note: i.note }),
+    );
+    return { flag, ...reconOut(t, { id: flag.reconciliation_id }) };
   },
 });
 

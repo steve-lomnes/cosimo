@@ -107,6 +107,15 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   batches) plug in. Expired items can be discarded (rejected), not approved.
 - **Reconciliation** balances use the statement sign (card = amount owed). Beginning balance = last
   completed reconciliation's ending balance. Undo is owner-only and must go latest-first.
+- **Reconciliation statements and flags** (#118). A statement is an ordinary attachment with target
+  type `reconciliation`, uploaded in the web app in any status (links aren't covered by the lock
+  triggers, and a statement changes no balance). There is no base64 upload over MCP: a statement PDF
+  in tool arguments costs too much context, so the agent gets `reconcile_url` for the person. The
+  agent reads the file with `read_statement`, starts a reconciliation, clears lines, and raises flags
+  (`reconciliation_flags`); these apply directly and are audited, like receipts. It resolves only the
+  flags it raised and never dismisses. Completing, discarding, and undoing stay with a person
+  (`completeReconTx` refuses the `mcp` actor and propose-only tokens), and open flags block Complete.
+  Discarding deletes the flags and unlinks the statements; the files stay.
 - **E2E**: Playwright spec files are `*.e2e.ts` so `bun test` doesn't pick them up; the e2e server is
   started through the real `cosimo init --answers` + `serve`.
 

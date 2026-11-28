@@ -277,7 +277,7 @@ const PaymentSchema = z
   .openapi("Payment");
 const Application = z.object({ document_id: Id, amount: Cents.refine((n) => n > 0, "Must be positive") });
 
-const AttachmentSchema = z
+export const AttachmentSchema = z
   .object({
     id: z.string(),
     filename: z.string(),

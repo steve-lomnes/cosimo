@@ -66,6 +66,11 @@ describe(`year-end package (${DB_MODE})`, () => {
       line_ids: detail.body.lines.map((l: any) => l.id),
       cleared: true,
     });
+    const form = new FormData();
+    form.append("file", new File(["%PDF-1.4\n% statement\n"], "dec.pdf", { type: "application/pdf" }));
+    form.append("target_type", "reconciliation");
+    form.append("target_id", start.body.id);
+    expect((await owner.req("POST", `${base()}/attachments`, form)).status).toBe(201);
     const done = await owner.json("POST", `${base()}/reconciliations/${start.body.id}/complete`);
     expect(done.body.status).toBe("completed");
   });
@@ -91,8 +96,16 @@ describe(`year-end package (${DB_MODE})`, () => {
       "09-reconciliations/reconciliation-Business-Checking-2025-12-31",
     ];
     expect(names).toEqual(
-      [...reports.flatMap((r) => [`${r}.csv`, `${r}.pdf`]), "README.txt", "chain.json"].sort(),
+      [
+        ...reports.flatMap((r) => [`${r}.csv`, `${r}.pdf`]),
+        "09-reconciliations/reconciliation-Business-Checking-2025-12-31-statement.pdf",
+        "README.txt",
+        "chain.json",
+      ].sort(),
     );
+    expect(
+      strFromU8(files["09-reconciliations/reconciliation-Business-Checking-2025-12-31-statement.pdf"]!),
+    ).toStartWith("%PDF-1.4");
     for (const n of names.filter((x) => x.endsWith(".pdf")))
       expect(strFromU8(files[n]!.slice(0, 5))).toBe("%PDF-");
 

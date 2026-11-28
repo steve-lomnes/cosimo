@@ -584,6 +584,13 @@ describe("MCP", () => {
       "book_receipt",
       "list_attachments",
       "link_attachment",
+      "list_reconciliations",
+      "get_reconciliation",
+      "read_statement",
+      "start_reconciliation",
+      "clear_reconciliation_lines",
+      "flag_reconciliation_item",
+      "resolve_reconciliation_flag",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])

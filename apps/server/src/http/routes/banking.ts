@@ -25,9 +25,13 @@ import { commitImportTx, MAX_IMPORT_BYTES, previewImport } from "../../services/
 import { withReceipts } from "../../services/receipts.ts";
 import {
   completeReconTx,
+  createFlagTx,
   discardReconTx,
+  FLAG_KINDS,
   listRecons,
+  mustGetFlag,
   reconLines,
+  resolveFlagTx,
   startReconTx,
   toggleLinesTx,
   undoReconTx,
@@ -45,7 +49,7 @@ import {
   savePolicyTx,
 } from "../../services/review.ts";
 import { createRuleTx, deleteRuleTx, listRules, updateRuleTx } from "../../services/rules.ts";
-import { ApiError, forbidden, fromDbError } from "../errors.ts";
+import { ApiError, forbidden, fromDbError, notFound } from "../errors.ts";
 import { requireOwner, requireWriter } from "../middleware.ts";
 import {
   bearerSecurity,
@@ -60,6 +64,7 @@ import {
   OrgParams,
   z,
 } from "../openapi.ts";
+import { AttachmentSchema } from "./documents.ts";
 import { EntrySchema, submitView } from "./ledger.ts";
 import { SyncStatusFields } from "./plaid.ts";
 
@@ -275,8 +280,33 @@ const ReconSchema = z
     created_at: z.string(),
     completed_at: z.string().nullable(),
     undone_at: z.string().nullable(),
+    statement_count: z
+      .number()
+      .int()
+      .optional()
+      .openapi({ description: "Statement files attached (list only)" }),
+    open_flag_count: z.number().int().optional().openapi({ description: "Open flags (list only)" }),
   })
   .openapi("Reconciliation");
+const ReconFlagSchema = z
+  .object({
+    id: z.string(),
+    reconciliation_id: z.string(),
+    kind: z.enum(FLAG_KINDS),
+    date: z.string().nullable(),
+    amount: Cents.nullable().openapi({ description: "The statement's figure, in statement sign" }),
+    journal_line_id: z.string().nullable(),
+    description: z.string(),
+    status: z.enum(["open", "resolved", "dismissed"]),
+    created_by: z.string().nullable(),
+    created_actor: z.enum(ACTORS),
+    created_at: z.string(),
+    resolved_by: z.string().nullable(),
+    resolved_actor: z.enum(ACTORS).nullable(),
+    resolved_at: z.string().nullable(),
+    resolution_note: z.string().nullable(),
+  })
+  .openapi("ReconciliationFlag");
 const ReconLineSchema = z.object({
   id: z.string(),
   entry_id: z.string(),
@@ -295,6 +325,7 @@ const RuleParams = OrgParams.extend({ ruleId: Id.openapi({ param: { name: "ruleI
 const ReviewParams = OrgParams.extend({ reviewId: Id.openapi({ param: { name: "reviewId", in: "path" } }) });
 const PolicyParams = OrgParams.extend({ policyId: Id.openapi({ param: { name: "policyId", in: "path" } }) });
 const ReconParams = OrgParams.extend({ reconId: Id.openapi({ param: { name: "reconId", in: "path" } }) });
+const FlagParams = ReconParams.extend({ flagId: Id.openapi({ param: { name: "flagId", in: "path" } }) });
 
 const Rationale = z
   .string()
@@ -1243,7 +1274,14 @@ export function bankingRoutes() {
       security: bearerSecurity,
       request: { params: ReconParams },
       responses: {
-        200: json(z.object({ reconciliation: ReconSchema, lines: z.array(ReconLineSchema) })),
+        200: json(
+          z.object({
+            reconciliation: ReconSchema,
+            lines: z.array(ReconLineSchema),
+            flags: z.array(ReconFlagSchema),
+            statements: z.array(AttachmentSchema),
+          }),
+        ),
         ...errorResponses,
       },
     }),
@@ -1268,6 +1306,67 @@ export function bankingRoutes() {
       const id = c.req.valid("param").reconId;
       const b = c.req.valid("json");
       return c.json(await o.handle.write((tx) => toggleLinesTx(tx, id, b.line_ids, b.cleared)), 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "post",
+      path: "/orgs/{orgId}/reconciliations/{reconId}/flags",
+      tags: ["Reconciliation"],
+      summary: "Flag something that does not reconcile",
+      description:
+        "Open flags block completing. `missing_from_books` needs date and amount; `not_on_statement` needs journal_line_id; `mismatch` needs journal_line_id and amount or date; `beginning_balance` needs amount.",
+      security: bearerSecurity,
+      request: {
+        params: ReconParams,
+        body: jsonBody(
+          z.object({
+            kind: z.enum(FLAG_KINDS),
+            description: z.string().min(1).max(1000),
+            date: IsoDate.optional(),
+            amount: Cents.optional(),
+            journal_line_id: Id.optional(),
+          }),
+        ),
+      },
+      responses: { 201: json(ReconFlagSchema, "Created"), ...errorResponses },
+    }),
+    async (c) => {
+      const o = requireWriter(c);
+      const id = c.req.valid("param").reconId;
+      const b = c.req.valid("json");
+      return c.json(await o.handle.write((tx) => createFlagTx(tx, o.id, o.actor, id, b)), 201);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "post",
+      path: "/orgs/{orgId}/reconciliations/{reconId}/flags/{flagId}/resolve",
+      tags: ["Reconciliation"],
+      summary: "Resolve or dismiss a flag",
+      security: bearerSecurity,
+      request: {
+        params: FlagParams,
+        body: jsonBody(
+          z.object({ status: z.enum(["resolved", "dismissed"]), note: z.string().max(1000).optional() }),
+        ),
+      },
+      responses: { 200: json(ReconFlagSchema), ...errorResponses },
+    }),
+    async (c) => {
+      const o = requireWriter(c);
+      const { reconId, flagId } = c.req.valid("param");
+      const b = c.req.valid("json");
+      return c.json(
+        await o.handle.write(async (tx) => {
+          const f = await mustGetFlag(tx, flagId);
+          if (f.reconciliationId !== reconId) throw notFound("Flag");
+          return resolveFlagTx(tx, o.id, o.actor, flagId, b);
+        }),
+        200,
+      );
     },
   );
 

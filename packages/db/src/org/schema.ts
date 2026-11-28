@@ -806,6 +806,36 @@ export const reconciliationItems = sqliteTable(
   ],
 );
 
+/** Things an agent or person found that don't reconcile; open flags block completing. */
+export const reconciliationFlags = sqliteTable(
+  "reconciliation_flags",
+  {
+    id: text("id").primaryKey(),
+    reconciliationId: text("reconciliation_id")
+      .notNull()
+      .references(() => reconciliations.id),
+    kind: text("kind", {
+      enum: ["missing_from_books", "not_on_statement", "mismatch", "beginning_balance", "other"],
+    }).notNull(),
+    date: text("date"),
+    /** Cents in statement sign: the statement's figure. */
+    amount: integer("amount"),
+    journalLineId: text("journal_line_id").references(() => journalLines.id),
+    description: text("description").notNull(),
+    status: text("status", { enum: ["open", "resolved", "dismissed"] })
+      .notNull()
+      .default("open"),
+    createdBy: text("created_by"),
+    createdActor: text("created_actor").notNull(),
+    createdAt: text("created_at").notNull().default(now),
+    resolvedBy: text("resolved_by"),
+    resolvedActor: text("resolved_actor"),
+    resolvedAt: text("resolved_at"),
+    resolutionNote: text("resolution_note"),
+  },
+  (t) => [index("reconciliation_flags_recon_idx").on(t.reconciliationId)],
+);
+
 // ---------------------------------------------------------------------------
 // Documents and history
 // ---------------------------------------------------------------------------

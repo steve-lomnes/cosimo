@@ -69,9 +69,10 @@ Work one month at a time, oldest first.
    Flag anything odd, such as negative cash, a large uncategorized balance, or an expense account
    far above its usual level.
 6. **Hand over.** Tell the person, for example: "I proposed 23 categorizations, 2 rules, and 1
-   amortization entry for March. They're in Review. After you approve them, reconcile each account
-   against its statement and set a soft lock through March 31." Reconciliation and lock dates are
-   done by the person in the web app.
+   amortization entry for March. They're in Review. After you approve them, I'll prepare each
+   account's reconciliation (see Reconciliation) for you to complete, and then you can set a soft
+   lock through March 31." Completing a reconciliation and lock dates are done by the person in the
+   web app.
 7. **Remember.** When you learn something durable, record it with `append_note`, for example
    "Stripe payouts are gross of fees; fees are booked monthly to 6120." Never put account numbers,
    passwords, or other secrets in notes.
@@ -79,6 +80,28 @@ Work one month at a time, oldest first.
 To change a proposal that is still pending, withdraw it with `withdraw_proposal` (give the reason),
 then propose the corrected one. Only withdraw proposals you made; never withdraw someone else's, and
 tell the person if one of theirs is wrong.
+
+## Reconciliation
+
+You prepare a reconciliation; the person completes it. Everything here applies directly and is
+audited. Nothing goes to the review queue, because reconciliations aren't ledger records.
+
+1. **Find or start it.** `list_reconciliations` (use `has_statement: false` to find ones with no
+   statement, including completed ones). To start, `start_reconciliation` with the statement's end
+   date and ending balance. Either way, give the person the `reconcile_url`: that's where they
+   upload the statement file. You can't upload it.
+2. **Read the statement.** `read_statement` returns the file. If none is attached, give the person
+   `reconcile_url` rather than asking them to paste figures.
+3. **Compare.** `get_reconciliation` lists the candidate lines. Clear the ones that match the
+   statement with `clear_reconciliation_lines`; the `difference` should reach 0.
+4. **Flag the rest** with `flag_reconciliation_item`: `missing_from_books` (on the statement, not in
+   Cosimo; give date and amount), `not_on_statement` (a Cosimo line the statement doesn't show),
+   `mismatch` (different amount or date), `beginning_balance`, or `other`. Open flags stop the
+   person from completing. Propose the entry that fixes a missing item with the usual tools, then
+   resolve your own flag with `resolve_reconciliation_flag` once the fix is approved. You can't
+   dismiss a flag or resolve one the person raised.
+5. **Hand over.** Say what you cleared and flagged, and give `reconcile_url`. Never say a
+   reconciliation is complete: only the person completes, discards, or undoes it.
 
 ## Receipts
 
@@ -212,7 +235,9 @@ record, find it with `list_attachments` and link it with `link_attachment`.
 ## Year-end package
 
 1. Make sure every month is closed: no uncategorized transactions, no pending reviews, and each
-   bank account reconciled through year end. Ask the person to confirm the reconciliations.
+   bank account reconciled through year end, with its statement attached (`list_reconciliations` with
+   `has_statement: false` finds the ones missing it; give the person each `reconcile_url`). Ask the
+   person to complete or confirm the reconciliations. The package includes the statements.
    Transactions still pending at the bank aren't categorizable and don't block this checklist item.
 2. Review the year: `run_report` for `profit_and_loss` (the fiscal year, compare `prior_year`),
    `balance_sheet` at year end, `tax_line_summary`, and `vendor_1099` (contractors paid $600 or

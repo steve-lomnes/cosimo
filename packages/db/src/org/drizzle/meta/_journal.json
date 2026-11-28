@@ -85,6 +85,13 @@
       "when": 1793019499565,
       "tag": "0011_owner_paid_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1795869120400,
+      "tag": "0012_reconciliation_flags",
+      "breakpoints": true
     }
   ]
 }

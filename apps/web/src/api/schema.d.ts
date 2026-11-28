@@ -9898,6 +9898,8 @@ export interface paths {
                                 amount: number;
                                 cleared?: boolean;
                             }[];
+                            flags: components["schemas"]["ReconciliationFlag"][];
+                            statements: components["schemas"]["Attachment"][];
                         };
                     };
                 };
@@ -10102,6 +10104,248 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["Reconciliation"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reconciliations/{reconId}/flags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Flag something that does not reconcile
+         * @description Open flags block completing. `missing_from_books` needs date and amount; `not_on_statement` needs journal_line_id; `mismatch` needs journal_line_id and amount or date; `beginning_balance` needs amount.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    reconId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        kind: "missing_from_books" | "not_on_statement" | "mismatch" | "beginning_balance" | "other";
+                        description: string;
+                        /**
+                         * Format: date
+                         * @example 2026-01-31
+                         */
+                        date?: string;
+                        /**
+                         * @description Integer minor units (cents)
+                         * @example 12345
+                         */
+                        amount?: number;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        journal_line_id?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReconciliationFlag"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/reconciliations/{reconId}/flags/{flagId}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resolve or dismiss a flag */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    reconId: string;
+                    flagId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "resolved" | "dismissed";
+                        note?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReconciliationFlag"];
                     };
                 };
                 /** @description Invalid request */
@@ -15224,7 +15468,7 @@ export interface paths {
                         /** Format: binary */
                         file?: string;
                         /** @enum {string} */
-                        target_type?: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings" | "receipt";
+                        target_type?: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings" | "receipt" | "reconciliation";
                         target_id?: string;
                     };
                 };
@@ -15439,7 +15683,7 @@ export interface paths {
                 content: {
                     "application/json": {
                         /** @enum {string} */
-                        target_type: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings" | "receipt";
+                        target_type: "bill" | "invoice" | "journal_entry" | "bank_transaction" | "contact" | "org_settings" | "receipt" | "reconciliation";
                         /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                         target_id: string;
                         unlink?: boolean;
@@ -22122,6 +22366,44 @@ export interface components {
             created_at: string;
             completed_at: string | null;
             undone_at: string | null;
+            /** @description Statement files attached (list only) */
+            statement_count?: number;
+            /** @description Open flags (list only) */
+            open_flag_count?: number;
+        };
+        ReconciliationFlag: {
+            id: string;
+            reconciliation_id: string;
+            /** @enum {string} */
+            kind: "missing_from_books" | "not_on_statement" | "mismatch" | "beginning_balance" | "other";
+            date: string | null;
+            /**
+             * @description The statement's figure, in statement sign
+             * @example 12345
+             */
+            amount: number | null;
+            journal_line_id: string | null;
+            description: string;
+            /** @enum {string} */
+            status: "open" | "resolved" | "dismissed";
+            created_by: string | null;
+            /** @enum {string} */
+            created_actor: "user" | "api_token" | "mcp" | "rule" | "system" | "integration";
+            created_at: string;
+            resolved_by: string | null;
+            /** @enum {string|null} */
+            resolved_actor: "user" | "api_token" | "mcp" | "rule" | "system" | "integration" | null;
+            resolved_at: string | null;
+            resolution_note: string | null;
+        };
+        Attachment: {
+            id: string;
+            filename: string;
+            mime_type: string;
+            size_bytes: number;
+            sha256: string;
+            uploaded_by: string | null;
+            created_at: string;
         };
         Receipt: {
             id: string;
@@ -22403,15 +22685,6 @@ export interface components {
                 amount: number;
                 applied_date: string | null;
             }[];
-            created_at: string;
-        };
-        Attachment: {
-            id: string;
-            filename: string;
-            mime_type: string;
-            size_bytes: number;
-            sha256: string;
-            uploaded_by: string | null;
             created_at: string;
         };
         RecurringTemplate: {

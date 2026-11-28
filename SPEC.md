@@ -349,6 +349,15 @@ The Categorize screen (Banking → Categorize) is the main daily workflow. For e
 - Check off cleared lines until the difference is zero, then complete.
 - Completed reconciliations are locked. Undoing requires an owner and is audit logged.
 - Show unreconciled items and a reconciliation report.
+- Attach the statement file to the reconciliation (an attachment with target type `reconciliation`),
+  in any status, so older reconciliations can get one later. The History list shows each one's
+  statement count.
+- Flag what doesn't reconcile (on the statement but not in the books, in the books but not on the
+  statement, a different amount or date, a different beginning balance, or other). A flag is open,
+  then resolved or dismissed, with an optional note. Completing is refused while any flag is open.
+- An AI assistant can read the statement, start a reconciliation, clear lines, flag items, and
+  resolve flags it raised. It cannot complete, discard, or undo a reconciliation, or dismiss a flag.
+- The year-end package includes each completed reconciliation's statement files and its flags.
 
 ### 7.5 Review Queue
 

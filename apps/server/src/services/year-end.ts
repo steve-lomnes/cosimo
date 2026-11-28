@@ -8,19 +8,37 @@
  */
 import { org } from "@cosimo/db";
 import { addMonths, fiscalYearEnd, VERSION } from "@cosimo/shared";
-import { and, asc, gte, lte } from "drizzle-orm";
+import { and, asc, eq, gte, lte } from "drizzle-orm";
 import { strToU8, zipSync } from "fflate";
 import type { AppContext } from "../context.ts";
 import { anchorNow, anchorPackageFiles } from "./anchors.ts";
+import { listAttachments } from "./attachments.ts";
 import { checkpoint } from "./chain.ts";
 import { settingsRow } from "./ledger.ts";
 import { reconciliationFiles } from "./reconcile.ts";
 import { type ReportKey, type ReportParams, reportCsv, reportPdf, runReport } from "./reports.ts";
+import type { BlobStore } from "./storage.ts";
 import type { OrgHandle } from "./types.ts";
 
 export interface YearEndPeriod {
   from: string;
   to: string;
+}
+
+const STATEMENT_EXT: Record<string, string> = {
+  "application/pdf": "pdf",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/heic": "heic",
+  "text/csv": "csv",
+  "text/plain": "txt",
+};
+
+/** File extension for a statement, from its mime type (the original name's extension if unknown). */
+function statementExt(mime: string, filename: string) {
+  return STATEMENT_EXT[mime] ?? (/\.([A-Za-z0-9]{1,8})$/.exec(filename)?.[1]?.toLowerCase() || "bin");
 }
 
 /** The fiscal year that ends in calendar year `year`. */
@@ -111,6 +129,7 @@ export async function buildYearEndPackage(
     .orderBy(asc(org.reconciliations.statementEndDate), asc(org.reconciliations.id))
     .all();
   const completed = recons.filter((r) => r.status === "completed");
+  const missingStatements: string[] = [];
   const skipped = recons.filter((r) => r.status === "in_progress").length;
   for (const rec of completed) {
     const f = await reconciliationFiles(db, rec.id, orgName, generatedAt);
@@ -119,6 +138,26 @@ export async function buildYearEndPackage(
     entries[`${base}.pdf`] = f.pdf;
     entries[`${base}.csv`] = strToU8(f.csv);
     listing.push(`${base}.pdf / .csv  Reconciliation report`);
+    // The statement files, next to the report they support.
+    const statements = await listAttachments(db, { type: "reconciliation", id: rec.id });
+    const store = opts.ctx?.services.storage as BlobStore | undefined;
+    for (const [i, att] of statements.entries()) {
+      const key = (
+        await db
+          .select({ k: org.attachments.storageKey })
+          .from(org.attachments)
+          .where(eq(org.attachments.id, att.id))
+          .get()
+      )?.k;
+      const bytes = key && store ? await store.get(key) : null;
+      if (!bytes) {
+        missingStatements.push(`${att.filename} (${f.name})`);
+        continue;
+      }
+      const path = `${base}-statement${statements.length > 1 ? `-${i + 1}` : ""}.${statementExt(att.mime_type, att.filename)}`;
+      entries[path] = bytes;
+      listing.push(`${path}  Statement`);
+    }
   }
 
   // Anchor the chain heads: record a checkpoint and put the same heads in chain.json.
@@ -166,6 +205,11 @@ export async function buildYearEndPackage(
     `- Reconciliation reports cover completed reconciliations with a statement end date from`,
     `  ${lastMonthStart} to ${period.to}.${completed.length ? "" : " There were none."}` +
       (skipped ? ` ${skipped} in-progress reconciliation(s) were not included.` : ""),
+    ...(missingStatements.length
+      ? [
+          `- Statement files that could not be read from storage were left out: ${missingStatements.join("; ")}.`,
+        ]
+      : []),
     ...(notYetEnded ? [`- This fiscal year had not ended when the package was generated.`] : []),
     "",
     "Files",

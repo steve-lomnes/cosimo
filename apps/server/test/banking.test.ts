@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import type { ActorInfo } from "../src/services/actor.ts";
 import { categorizeTx } from "../src/services/banking.ts";
 import { submitEntryTx } from "../src/services/ledger.ts";
+import { completeReconTx, resolveFlagTx } from "../src/services/reconcile.ts";
 import { approveReviewTx, expireOldTx, rejectReviewTx } from "../src/services/review.ts";
 import { addMember, type Client, createOrg, createTestEnv, DB_MODE, login, type TestEnv } from "./harness.ts";
 
@@ -782,6 +783,366 @@ describe(`reconciliation (${DB_MODE})`, () => {
       .where(eq(org.reconciliations.id, start.body.id))
       .get();
     expect(row?.undoneBy).toBe(owner.userId);
+  });
+
+  describe(`reconciliation statements and flags (${DB_MODE})`, () => {
+    const PDF = new TextEncoder().encode("%PDF-1.4\n% fake statement\n");
+    let reconId: string;
+    let lines: any[];
+
+    const upload = (target: string, name = "statement.pdf") => {
+      const form = new FormData();
+      form.append("file", new File([PDF], name, { type: "application/pdf" }));
+      form.append("target_type", "reconciliation");
+      form.append("target_id", target);
+      return owner.req("POST", `${base()}/attachments`, form);
+    };
+    const flag = (body: Record<string, unknown>, id = reconId) =>
+      owner.json("POST", `${base()}/reconciliations/${id}/flags`, body);
+    const detail = async (id = reconId) => (await owner.json("GET", `${base()}/reconciliations/${id}`)).body;
+    const counts = async (id: string) =>
+      (await owner.json("GET", `${base()}/reconciliations`)).body.data.find((r: any) => r.id === id);
+
+    test("upload a statement to an in-progress reconciliation and list it", async () => {
+      const start = await owner.json("POST", `${base()}/reconciliations`, {
+        account_id: savings.ledger_account_id,
+        statement_end_date: "2026-01-31",
+        statement_ending_balance: 50000,
+      });
+      expect(start.status).toBe(201);
+      reconId = start.body.id;
+      expect((await counts(reconId)).statement_count).toBe(0);
+      const up = await upload(reconId);
+      expect(up.status).toBe(201);
+      const att = await up.json();
+      const d = await detail();
+      expect(d.statements.map((a: any) => a.id)).toEqual([att.id]);
+      lines = d.lines;
+      expect((await counts(reconId)).statement_count).toBe(1);
+      const list = await owner.json(
+        "GET",
+        `${base()}/attachments?target_type=reconciliation&target_id=${reconId}`,
+      );
+      expect(list.body.data).toHaveLength(1);
+    });
+
+    test("flags are validated per kind, and a duplicate open flag is refused", async () => {
+      const line = lines[0].id;
+      const bad = [
+        { kind: "missing_from_books", description: "x" },
+        { kind: "missing_from_books", description: "x", date: "2026-01-15" },
+        { kind: "not_on_statement", description: "x" },
+        { kind: "mismatch", description: "x", journal_line_id: line },
+        { kind: "mismatch", description: "x", amount: 5 },
+        { kind: "beginning_balance", description: "x" },
+        { kind: "not_on_statement", description: "x", journal_line_id: "nope" },
+      ];
+      for (const b of bad) expect((await flag(b)).status).toBe(422);
+      const ok = await flag({
+        kind: "missing_from_books",
+        description: "Bank fee",
+        date: "2026-01-15",
+        amount: -1500,
+      });
+      expect(ok.status).toBe(201);
+      expect(ok.body).toMatchObject({ status: "open", created_actor: "user", amount: -1500 });
+      const dup = await flag({
+        kind: "missing_from_books",
+        description: "Bank fee again",
+        date: "2026-01-15",
+        amount: -1500,
+      });
+      expect(dup.status).toBe(409);
+      expect(dup.body.error.code).toBe("duplicate_flag");
+      expect((await flag({ kind: "not_on_statement", description: "?", journal_line_id: line })).status).toBe(
+        201,
+      );
+      expect(
+        (await flag({ kind: "not_on_statement", description: "again", journal_line_id: line })).status,
+      ).toBe(409);
+      expect(
+        (await flag({ kind: "beginning_balance", description: "Opens at 10", amount: 1000 })).status,
+      ).toBe(201);
+      expect((await flag({ kind: "other", description: "Look at page 2" })).status).toBe(201);
+      // a line of another account is refused
+      const other = await owner.json("GET", `${base()}/accounts/${checking.ledger_account_id}/unreconciled`);
+      if (other.body.data.length)
+        expect(
+          (await flag({ kind: "not_on_statement", description: "x", journal_line_id: other.body.data[0].id }))
+            .status,
+        ).toBe(422);
+      expect((await detail()).flags).toHaveLength(4);
+    });
+
+    test("open flags block Complete; resolve and dismiss clear them; the report lists them", async () => {
+      const transfer = lines.find((l) => l.amount === 50000);
+      await owner.json("POST", `${base()}/reconciliations/${reconId}/lines`, {
+        line_ids: [transfer.id],
+        cleared: true,
+      });
+      const blocked = await owner.json("POST", `${base()}/reconciliations/${reconId}/complete`);
+      expect(blocked.status).toBe(422);
+      expect(blocked.body.error.code).toBe("open_flags");
+      const flags = (await detail()).flags;
+      const [first, ...rest] = flags;
+      const res = await owner.json("POST", `${base()}/reconciliations/${reconId}/flags/${first.id}/resolve`, {
+        status: "resolved",
+        note: "Booked it",
+      });
+      expect(res.body).toMatchObject({
+        status: "resolved",
+        resolution_note: "Booked it",
+        resolved_actor: "user",
+      });
+      expect(
+        (
+          await owner.json("POST", `${base()}/reconciliations/${reconId}/flags/${first.id}/resolve`, {
+            status: "dismissed",
+          })
+        ).status,
+      ).toBe(409);
+      // a flag of another reconciliation is not found under this one
+      expect(
+        (
+          await owner.json("POST", `${base()}/reconciliations/${newId()}/flags/${rest[0].id}/resolve`, {
+            status: "dismissed",
+          })
+        ).status,
+      ).toBe(404);
+      for (const f of rest.slice(0, -1))
+        await owner.json("POST", `${base()}/reconciliations/${reconId}/flags/${f.id}/resolve`, {
+          status: "dismissed",
+        });
+      expect((await counts(reconId)).open_flag_count).toBe(1);
+      expect((await owner.json("POST", `${base()}/reconciliations/${reconId}/complete`)).status).toBe(422);
+      await owner.json("POST", `${base()}/reconciliations/${reconId}/flags/${rest.at(-1).id}/resolve`, {
+        status: "dismissed",
+        note: "Fine",
+      });
+
+      const csvRes = await owner.req("GET", `${base()}/reconciliations/${reconId}/export?format=csv`);
+      expect(csvRes.status).toBe(200);
+      const csv = await csvRes.text();
+      expect(csv).toContain("Flags");
+      expect(csv).toContain("Bank fee");
+      expect(csv).toContain("Booked it");
+      const done = await owner.json("POST", `${base()}/reconciliations/${reconId}/complete`);
+      expect(done.body.status).toBe("completed");
+    });
+
+    test("a statement can be added to a completed reconciliation without changing it", async () => {
+      const before = (await detail()).reconciliation;
+      const up = await upload(reconId, "second.pdf");
+      expect(up.status).toBe(201);
+      const after = await detail();
+      expect(after.statements).toHaveLength(2);
+      expect({ ...after.reconciliation, statement_count: undefined }).toEqual({
+        ...before,
+        statement_count: undefined,
+      });
+      expect(after.reconciliation.status).toBe("completed");
+      expect((await counts(reconId)).statement_count).toBe(2);
+      // flags can't be added to a completed reconciliation
+      expect((await flag({ kind: "other", description: "late" })).status).toBe(409);
+    });
+
+    test("completeReconTx refuses the mcp actor and propose-only actors", async () => {
+      const h = await env.ctx.orgs.mustOpen(orgId);
+      const start = await owner.json("POST", `${base()}/reconciliations`, {
+        account_id: card.ledger_account_id,
+        statement_end_date: "2026-01-31",
+        statement_ending_balance: 0,
+      });
+      expect(start.status).toBe(201);
+      const mcp: ActorInfo = { actor: "mcp", role: "owner", userId: owner.userId };
+      await expect(h.write((tx) => completeReconTx(tx, orgId, mcp, start.body.id))).rejects.toThrow(/person/);
+      const po: ActorInfo = { actor: "api_token", role: "owner", userId: owner.userId, proposeOnly: true };
+      await expect(h.write((tx) => completeReconTx(tx, orgId, po, start.body.id))).rejects.toThrow(/person/);
+      // a propose-only token can't dismiss, or resolve a flag a person raised
+      const personFlag = await flag({ kind: "other", description: "raised by a person" }, start.body.id);
+      expect(personFlag.status).toBe(201);
+      await expect(
+        h.write((tx) => resolveFlagTx(tx, orgId, po, personFlag.body.id, { status: "dismissed" })),
+      ).rejects.toThrow(/person/);
+      await expect(
+        h.write((tx) => resolveFlagTx(tx, orgId, po, personFlag.body.id, { status: "resolved" })),
+      ).rejects.toThrow(/you raised/);
+      // discarding removes its flags and unlinks its statements; the file stays
+      expect((await flag({ kind: "other", description: "gone soon" }, start.body.id)).status).toBe(201);
+      const up = await (await upload(start.body.id, "temp.pdf")).json();
+      expect((await owner.json("DELETE", `${base()}/reconciliations/${start.body.id}`)).status).toBe(200);
+      const rows = await h.db
+        .select()
+        .from(org.reconciliationFlags)
+        .where(eq(org.reconciliationFlags.reconciliationId, start.body.id))
+        .all();
+      expect(rows).toHaveLength(0);
+      const links = await h.db
+        .select()
+        .from(org.attachmentLinks)
+        .where(eq(org.attachmentLinks.targetId, start.body.id))
+        .all();
+      expect(links).toHaveLength(0);
+      expect((await owner.req("GET", `${base()}/attachments/${up.id}`)).status).toBe(200);
+      // clean up so the later tests start from a known state
+      await owner.json("POST", `${base()}/reconciliations/${reconId}/undo`);
+    });
+  });
+
+  describe(`reconciliation over MCP (${DB_MODE})`, () => {
+    const PDF = new TextEncoder().encode("%PDF-1.4\n% fake statement\n");
+    let token: string;
+    let viewerToken: string;
+
+    async function call(tok: string, name: string, args: Record<string, unknown>) {
+      const res = await env.app.request("/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${tok}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name, arguments: args },
+        }),
+      });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as any).result as {
+        isError: boolean;
+        structuredContent?: any;
+        content: any[];
+      };
+    }
+
+    beforeAll(async () => {
+      token = (
+        await owner.json("POST", "/api/v1/tokens", {
+          org_id: orgId,
+          name: "recon-assistant",
+          role: "bookkeeper",
+          propose_only: true,
+        })
+      ).body.token;
+      viewerToken = (
+        await owner.json("POST", "/api/v1/tokens", { org_id: orgId, name: "recon-ro", role: "viewer" })
+      ).body.token;
+    });
+
+    test("the agent starts, reads the statement, clears, flags, and resolves only its own flags", async () => {
+      const s = await call(token, "start_reconciliation", {
+        account_id: savings.ledger_account_id,
+        statement_end_date: "2026-01-31",
+        statement_ending_balance: 50000,
+        rationale: "Statement shared in chat",
+      });
+      expect(s.isError).toBe(false);
+      const id = s.structuredContent.reconciliation.id;
+      expect(s.structuredContent.reconcile_url).toBe(
+        `${env.config.server.public_url.replace(/\/$/, "")}/o/${orgId}/banking/reconcile/${id}`,
+      );
+
+      // no statement yet: the note points at reconcile_url
+      const none = await call(token, "read_statement", { reconciliation_id: id });
+      expect(none.content).toHaveLength(1);
+      expect(none.structuredContent.note).toContain("reconcile_url");
+      const missing = await call(token, "list_reconciliations", { has_statement: false });
+      expect(missing.structuredContent.data.map((r: any) => r.id)).toContain(id);
+
+      const form = new FormData();
+      form.append("file", new File([PDF], "jan.pdf", { type: "application/pdf" }));
+      form.append("target_type", "reconciliation");
+      form.append("target_id", id);
+      expect((await owner.req("POST", `${base()}/attachments`, form)).status).toBe(201);
+      const read = await call(token, "read_statement", { reconciliation_id: id });
+      expect(read.content[1]).toMatchObject({ type: "resource", resource: { mimeType: "application/pdf" } });
+      expect(Buffer.from(read.content[1].resource.blob, "base64")).toEqual(Buffer.from(PDF));
+      const withStmt = await call(token, "list_reconciliations", {
+        has_statement: true,
+        status: "in_progress",
+      });
+      expect(withStmt.structuredContent.data.map((r: any) => r.id)).toEqual([id]);
+
+      const g = await call(token, "get_reconciliation", { reconciliation_id: id });
+      const transfer = g.structuredContent.lines.find((l: any) => l.amount === 50000);
+      expect(g.structuredContent.statements).toHaveLength(1);
+      const c = await call(token, "clear_reconciliation_lines", {
+        reconciliation_id: id,
+        line_ids: [transfer.id],
+        cleared: true,
+        rationale: "Matches the statement",
+      });
+      expect(c.structuredContent.reconciliation.difference).toBe(0);
+
+      const f = await call(token, "flag_reconciliation_item", {
+        reconciliation_id: id,
+        kind: "missing_from_books",
+        description: "Fee on the statement",
+        date: "2026-01-20",
+        amount: -500,
+      });
+      expect(f.isError).toBe(false);
+      expect(f.structuredContent.flag).toMatchObject({ created_actor: "mcp", status: "open" });
+      const bad = await call(token, "flag_reconciliation_item", {
+        reconciliation_id: id,
+        kind: "not_on_statement",
+        description: "x",
+      });
+      expect(bad.isError).toBe(true);
+
+      // a person's flag can't be resolved by the agent
+      const theirs = await owner.json("POST", `${base()}/reconciliations/${id}/flags`, {
+        kind: "other",
+        description: "Person's note",
+      });
+      const refused = await call(token, "resolve_reconciliation_flag", {
+        flag_id: theirs.body.id,
+        note: "done",
+      });
+      expect(refused.isError).toBe(true);
+
+      // completing is blocked by the open flags, and the agent has no tool for it
+      expect((await owner.json("POST", `${base()}/reconciliations/${id}/complete`)).status).toBe(422);
+      const ok = await call(token, "resolve_reconciliation_flag", {
+        flag_id: f.structuredContent.flag.id,
+        note: "Booked the fee",
+      });
+      expect(ok.structuredContent.flag).toMatchObject({ status: "resolved", resolved_actor: "mcp" });
+      // the agent's token can't complete over REST either
+      const viaRest = await env.app.request(`${base()}/reconciliations/${id}/complete`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(viaRest.status).toBe(403);
+      await owner.json("POST", `${base()}/reconciliations/${id}/flags/${theirs.body.id}/resolve`, {
+        status: "dismissed",
+      });
+      expect((await owner.json("POST", `${base()}/reconciliations/${id}/complete`)).body.status).toBe(
+        "completed",
+      );
+      const audit = (await owner.json("GET", `${base()}/audit?limit=500`)).body.data;
+      for (const a of [
+        "reconciliation.start",
+        "reconciliation.clear",
+        "reconciliation.flag",
+        "reconciliation.flag_resolve",
+      ])
+        expect(audit.some((r: any) => r.action === a && r.actor === "mcp")).toBe(true);
+      await owner.json("POST", `${base()}/reconciliations/${id}/undo`);
+    });
+
+    test("a viewer connection is refused the write tools but can read", async () => {
+      const r = await call(viewerToken, "start_reconciliation", {
+        account_id: savings.ledger_account_id,
+        statement_end_date: "2026-01-31",
+        statement_ending_balance: 1,
+        rationale: "nope",
+      });
+      expect(r.isError).toBe(true);
+      expect((await call(viewerToken, "list_reconciliations", {})).isError).toBe(false);
+    });
   });
 
   test("the whole session leaves both chains intact and the books tied out", async () => {

@@ -23,6 +23,7 @@ export const ATTACHMENT_TARGETS = [
   "contact",
   "org_settings",
   "receipt",
+  "reconciliation",
 ] as const;
 export type AttachmentTarget = (typeof ATTACHMENT_TARGETS)[number];
 

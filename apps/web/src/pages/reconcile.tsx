@@ -2,7 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useState } from "react";
 import { api, unwrap } from "../api/client";
+import type { components } from "../api/schema";
 import { AccountSelect } from "../components/AccountSelect";
+import { Attachments } from "../components/Attachments";
 import {
   Alert,
   Amount,
@@ -19,11 +21,71 @@ import {
   td,
   th,
 } from "../components/ui";
-import { fmtDate, money, todayIso, tryParseCents } from "../lib/format";
+import { fmtDate, fmtDateTime, money, todayIso, tryParseCents } from "../lib/format";
 import { useAccounts } from "../lib/ledger";
 import { useOrgId, useRole } from "../lib/org";
 
 const STATUS_TONE = { in_progress: "amber", completed: "green", undone: "zinc" } as const;
+
+const FLAG_KIND_LABEL = {
+  missing_from_books: "On the statement, not in the books",
+  not_on_statement: "In the books, not on the statement",
+  mismatch: "Different amount or date",
+  beginning_balance: "Beginning balance differs",
+  other: "Other",
+} as const;
+type Flag = components["schemas"]["ReconciliationFlag"];
+
+const who = (actor: string | null) =>
+  actor === "mcp" ? "AI assistant" : actor === "api_token" ? "an API token" : "a person";
+
+function FlagRow({
+  flag,
+  editable,
+  onResolve,
+  busy,
+}: {
+  flag: Flag;
+  editable: boolean;
+  onResolve: (status: "resolved" | "dismissed", note: string) => void;
+  busy: boolean;
+}) {
+  const [note, setNote] = useState("");
+  const open = flag.status === "open";
+  return (
+    <li className={cx("py-3 text-sm", !open && "text-zinc-500")}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={open ? "amber" : "zinc"}>{FLAG_KIND_LABEL[flag.kind]}</Badge>
+        {flag.date && <span>{fmtDate(flag.date)}</span>}
+        {flag.amount != null && <Amount cents={flag.amount} />}
+        {!open && <Badge>{flag.status}</Badge>}
+      </div>
+      <p className="mt-1">{flag.description}</p>
+      <p className="text-xs text-zinc-500">
+        Raised by {who(flag.created_actor)} on {fmtDateTime(flag.created_at)}
+        {!open && ` · ${flag.status} by ${who(flag.resolved_actor)} on ${fmtDateTime(flag.resolved_at)}`}
+        {flag.resolution_note && ` · ${flag.resolution_note}`}
+      </p>
+      {open && editable && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Input
+            aria-label="Note"
+            className="max-w-xs"
+            placeholder="Note (optional)"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => onResolve("resolved", note)}>
+            Resolve
+          </Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => onResolve("dismissed", note)}>
+            Dismiss
+          </Button>
+        </div>
+      )}
+    </li>
+  );
+}
 
 export function ReconcileListPage() {
   const orgId = useOrgId();
@@ -117,6 +179,7 @@ export function ReconcileListPage() {
                   <th className={th}>Statement date</th>
                   <th className={`${th} text-right`}>Ending balance</th>
                   <th className={th}>Status</th>
+                  <th className={th}>Statement</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -137,6 +200,13 @@ export function ReconcileListPage() {
                     </td>
                     <td className={td}>
                       <Badge tone={STATUS_TONE[r.status]}>{r.status.replace("_", " ")}</Badge>
+                    </td>
+                    <td className={td}>
+                      {r.statement_count ? (
+                        `${r.statement_count} ${r.statement_count === 1 ? "file" : "files"}`
+                      ) : (
+                        <span className="text-zinc-500">None</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -178,6 +248,16 @@ export function ReconcilePage() {
       ),
     onSuccess: refresh,
   });
+  const resolve = useMutation({
+    mutationFn: (v: { flagId: string; status: "resolved" | "dismissed"; note: string }) =>
+      unwrap(
+        api.POST("/api/v1/orgs/{orgId}/reconciliations/{reconId}/flags/{flagId}/resolve", {
+          params: { path: { orgId, reconId, flagId: v.flagId } },
+          body: { status: v.status, note: v.note.trim() || undefined },
+        }),
+      ),
+    onSuccess: refresh,
+  });
   const action = useMutation({
     mutationFn: async (a: "complete" | "undo" | "discard") => {
       const params = { path: { orgId, reconId } };
@@ -194,7 +274,12 @@ export function ReconcilePage() {
   });
   if (q.isLoading) return <Loading />;
   if (!q.data) return <ErrorText error={q.error} />;
-  const { reconciliation: r, lines } = q.data;
+  const { reconciliation: r, lines, flags } = q.data;
+  const openFlags = flags.filter((f) => f.status === "open");
+  const closedFlags = flags.filter((f) => f.status !== "open");
+  const flagged = new Set(
+    flags.filter((f) => f.status === "open" && f.journal_line_id).map((f) => f.journal_line_id),
+  );
   const acct = accounts.data?.find((a) => a.id === r.account_id);
   const editable = r.status === "in_progress" && canWrite;
   const cleared = lines.filter((l) => l.cleared);
@@ -218,7 +303,7 @@ export function ReconcilePage() {
                   Discard
                 </Button>
                 <Button
-                  disabled={r.difference !== 0}
+                  disabled={r.difference !== 0 || openFlags.length > 0}
                   loading={action.isPending && action.variables === "complete"}
                   onClick={() => action.mutate("complete")}
                 >
@@ -263,7 +348,31 @@ export function ReconcilePage() {
             </Card>
           ))}
         </div>
-        <ErrorText error={toggle.error ?? action.error} />
+        <ErrorText error={toggle.error ?? action.error ?? resolve.error} />
+        {editable && openFlags.length > 0 && (
+          <Alert kind="warn">
+            Resolve or dismiss the {openFlags.length} open {openFlags.length === 1 ? "flag" : "flags"} below
+            to complete this reconciliation.
+          </Alert>
+        )}
+        <Card title="Statement">
+          <Attachments targetType="reconciliation" targetId={r.id} label="Upload statement" />
+        </Card>
+        {flags.length > 0 && (
+          <Card title={`Flags (${openFlags.length} open)`}>
+            <ul className="divide-y divide-zinc-100 dark:divide-zinc-800" aria-label="Flags">
+              {[...openFlags, ...closedFlags].map((f) => (
+                <FlagRow
+                  key={f.id}
+                  flag={f}
+                  editable={editable}
+                  busy={resolve.isPending}
+                  onResolve={(status, note) => resolve.mutate({ flagId: f.id, status, note })}
+                />
+              ))}
+            </ul>
+          </Card>
+        )}
         {r.status === "completed" && <Alert kind="success">Completed and locked.</Alert>}
         {r.status === "undone" && <Alert kind="warn">This reconciliation was undone.</Alert>}
         <Card
@@ -325,6 +434,11 @@ export function ReconcilePage() {
                     >
                       {l.memo || l.description || "(no memo)"}
                     </Link>
+                    {flagged.has(l.id) && (
+                      <span role="img" aria-label="Flagged" title="Flagged" className="ml-1.5">
+                        ⚑
+                      </span>
+                    )}
                   </td>
                   <td className={`${td} text-right`}>
                     <Amount cents={l.amount} />
